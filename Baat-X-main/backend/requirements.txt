@@ -1,0 +1,31 @@
+# ---- BaatX backend runtime dependencies (pinned) ----
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+gunicorn==23.0.0
+pydantic==2.11.9
+pydantic-settings==2.11.0
+email-validator==2.3.0
+sqlalchemy[asyncio]==2.0.43
+alembic==1.16.5
+asyncpg==0.30.0
+# redis MUST stay <6: arq 0.26.3 declares redis<6 and pip cannot resolve 6.x
+redis==5.2.1
+arq==0.26.3
+httpx==0.28.1
+tenacity==9.1.2
+python-multipart==0.0.20
+pyjwt[crypto]==2.10.1
+argon2-cffi==25.1.0
+python-dateutil==2.9.0.post0
+phonenumbers==9.0.15
+structlog==25.4.0
+orjson==3.11.3
+azure-identity==1.25.0
+azure-storage-blob==12.26.0
+azure-keyvault-secrets==4.10.0
+openai==2.1.0
+azure-monitor-opentelemetry==1.8.1
+opentelemetry-instrumentation-fastapi==0.58b0
+# Windows has no IANA timezone database; BaatX is timezone-aware throughout
+# (per-business timezones, IST date resolution). Linux images already have it.
+tzdata==2025.1 ; sys_platform == "win32"

@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (git-ignored) or pass with -var-file in CI.
+storage_account_name      = "stbaatxstaging01"
+key_vault_name            = "kv-baatx-staging"
+container_registry_server = "acrbaatx.azurecr.io"
+container_registry_id     = "/subscriptions/<sub>/resourceGroups/rg-baatx-shared/providers/Microsoft.ContainerRegistry/registries/acrbaatx"
+api_image                 = "acrbaatx.azurecr.io/baatx-api:latest"
+worker_image              = "acrbaatx.azurecr.io/baatx-worker:latest"
+azure_openai_endpoint     = "https://oai-baatx.openai.azure.com"
+azure_openai_resource_id  = "/subscriptions/<sub>/resourceGroups/rg-baatx-shared/providers/Microsoft.CognitiveServices/accounts/oai-baatx"
+azure_speech_region       = "centralindia"
+alert_emails              = ["oncall@example.com"]

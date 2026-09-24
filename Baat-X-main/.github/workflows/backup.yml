@@ -1,0 +1,63 @@
+name: Database Backup
+
+# Nightly encrypted dumps using GitHub Actions minutes (free: 2,000/month on
+# private repos). Each run is well under a minute, so this costs ~30 min/month.
+#
+# Turn this on the day a real salesperson's data goes in.
+
+on:
+  schedule:
+    - cron: "30 19 * * *"      # 01:00 IST (GitHub cron is UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+
+      - name: Dump
+        env:
+          # The PLAIN libpq URL, not the SQLAlchemy one:
+          #   postgresql://user:pw@host/db?sslmode=require
+          # pg_dump does not understand the +asyncpg driver prefix.
+          PGURL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          pg_dump "$PGURL" --format=custom --no-owner --no-privileges \
+            --file="baatx-${STAMP}.dump"
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+          ls -lh "baatx-${STAMP}.dump"
+
+      - name: Encrypt
+        env:
+          PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          gpg --batch --yes --symmetric --cipher-algo AES256 \
+            --passphrase "$PASSPHRASE" \
+            --output "baatx-${STAMP}.dump.gpg" "baatx-${STAMP}.dump"
+          rm -f "baatx-${STAMP}.dump"      # never upload plaintext
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baatx-backup-${{ env.STAMP }}
+          path: "*.dump.gpg"
+          retention-days: 30
+
+# RESTORE - practise this before you need it:
+#
+#   gpg --batch --decrypt --passphrase "$PASSPHRASE" \
+#       --output restore.dump baatx-YYYYMMDD-HHMM.dump.gpg
+#   pg_restore --clean --if-exists --no-owner --no-privileges \
+#       --dbname "postgresql://user:pw@host/SCRATCH_db?sslmode=require" restore.dump
+#
+# Restore into a scratch database, never over production. Then sanity check:
+#   SELECT count(*) FROM customers;

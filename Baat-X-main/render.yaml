@@ -1,0 +1,92 @@
+# BaatX deployment blueprint.
+#
+# Postgres and Redis are deliberately NOT declared here:
+#   * Render's free Postgres deletes itself after 30 days  -> use Neon
+#   * Render's free Key Value is 25 MB, in-memory only     -> use Upstash
+# Both are free and permanent. Paste their URLs when Render prompts.
+
+services:
+  - type: web
+    name: baatx-api
+    runtime: docker
+    plan: free                  # ~Rs 600/mo. Use `free` first to verify.
+    region: singapore              # closest to India
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python start.py     # API + worker
+    healthCheckPath: /health
+    autoDeploy: true
+
+    # NOTE ON `free` vs `starter`:
+    # On `free` the service sleeps after 15 min idle. arq's scheduler only
+    # ticks while the process is alive, so the reminder sweep and daily
+    # reports never run - the "reminds you" half of BaatX stops working.
+    # Start on free to verify the deploy, then switch to starter.
+
+    envVars:
+      - key: ENVIRONMENT
+        value: staging             # keeps /docs open; 'prod' closes it
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LOG_JSON
+        value: "true"
+
+      # ---------------- secrets: paste in the Render dashboard -------------
+      - key: DATABASE_URL          # postgresql+asyncpg://...?ssl=require
+        sync: false
+      - key: REDIS_URL             # rediss://default:<pw>@<host>.upstash.io:6379
+        sync: false
+      - key: OPENAI_API_KEY        # Google AI Studio (Gemini)
+        sync: false
+      - key: STT_API_KEY           # console.groq.com
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true        # Render generates a strong value
+
+      # ---------------- LLM: Gemini via OpenAI-compatible endpoint ---------
+      - key: LLM_PROVIDER
+        value: openai_compatible
+      - key: OPENAI_BASE_URL
+        value: https://generativelanguage.googleapis.com/v1beta/openai/
+      - key: OPENAI_MODEL
+        value: gemini-3-flash      # confirm the exact name in AI Studio
+      - key: LLM_TEMPERATURE
+        value: "0.1"
+
+      # ---------------- STT: Groq Whisper ----------------
+      - key: STT_PROVIDER
+        value: openai_compatible
+      - key: STT_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: STT_MODEL
+        value: whisper-large-v3
+      - key: STT_CANDIDATE_LOCALES
+        value: hi-IN,en-IN
+      - key: STT_MAX_PART_BYTES
+        value: "24000000"
+
+      # ---------------- audio ----------------
+      # Ephemeral disk is fine: BaatX deletes audio right after processing,
+      # so there is nothing we wanted to keep. No blob storage needed.
+      - key: STORAGE_PROVIDER
+        value: local
+      - key: AUDIO_MAX_BYTES
+        value: "24000000"          # match STT limit; reject early, clear message
+      - key: DELETE_AUDIO_AFTER_PROCESSING
+        value: "true"
+      - key: RETAIN_TRANSCRIPTS
+        value: "false"
+
+      # ---------------- rate limits, sized to the free AI quotas -----------
+      - key: RATE_LIMIT_AI
+        value: 8/minute
+      - key: RATE_LIMIT_DEFAULT
+        value: 200/minute
+      - key: RATE_LIMIT_AUTH
+        value: 10/minute
+
+      # ---------------- tighten once you have a domain ----------------
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: TRUSTED_HOSTS
+        value: "*"

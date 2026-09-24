@@ -1,0 +1,31 @@
+[project]
+name = "baatx-backend"
+version = "1.0.0"
+description = "BaatX - AI sales assistant & CRM backend"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "C4", "SIM", "RUF"]
+ignore = ["S101", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]
+"app/models/*" = ["RUF012"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+# Without this, a bare `pytest` cannot import `app`. CI runs from
+# working-directory: backend and hits exactly this.
+pythonpath = ["."]

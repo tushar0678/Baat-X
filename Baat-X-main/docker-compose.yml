@@ -1,0 +1,64 @@
+name: baatx
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: baatx
+      POSTGRES_PASSWORD: baatx
+      POSTGRES_DB: baatx
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baatx"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: ["redisdata:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  azurite:
+    # Local stand-in for Azure Blob Storage (temporary audio only).
+    # Not needed when STORAGE_PROVIDER=local, but harmless to leave running.
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--skipApiVersionCheck"]
+    ports: ["10000:10000"]
+    volumes: ["azuritedata:/data"]
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: [.env]
+    environment:
+      # Container-to-container hostnames override whatever .env says, so the
+      # same .env works for both `docker compose up` and running on the host.
+      DATABASE_URL: postgresql+asyncpg://baatx:baatx@postgres:5432/baatx
+      REDIS_URL: redis://redis:6379/0
+      PORT: "8000"
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    # Runs migrations, then the arq worker, then the API - identical to Render.
+    command: python start.py
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  pgdata:
+  redisdata:
+  azuritedata:

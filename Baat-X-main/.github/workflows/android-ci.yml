@@ -1,0 +1,118 @@
+name: Android CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ["android/**", ".github/workflows/android-ci.yml"]
+  pull_request:
+    paths: ["android/**", ".github/workflows/android-ci.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: android
+
+jobs:
+  # ==========================================
+  # JOB 1: LINT (Code Quality Check)
+  # ==========================================
+  lint:
+    name: Code Quality (Lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Inject Secrets into keystore.properties
+        run: |
+          echo "BAATX_API_BASE_URL=${{ secrets.BAATX_API_BASE_URL }}" > keystore.properties
+          
+      - name: Generate Gradle Wrapper
+        run: gradle wrapper
+        
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+        
+      - name: Run Static Analysis
+        run: ./gradlew lintDebug --no-daemon
+
+  # ==========================================
+  # JOB 2: TEST (Unit Testing)
+  # ==========================================
+  test:
+    name: Unit Tests
+    needs: lint # Waits for lint to finish successfully
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Inject Secrets into keystore.properties
+        run: |
+          echo "BAATX_API_BASE_URL=${{ secrets.BAATX_API_BASE_URL }}" > keystore.properties
+          
+      - name: Generate Gradle Wrapper
+        run: gradle wrapper
+        
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+        
+      - name: Run Unit Tests
+        run: ./gradlew testDebugUnitTest --no-daemon
+        
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-test-reports
+          path: android/app/build/reports/**
+
+  # ==========================================
+  # JOB 3: BUILD APK (Generates the App)
+  # ==========================================
+  build-apk:
+    name: Build Debug APK
+    needs: test # Waits for test to finish successfully
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Inject Secrets into keystore.properties
+        run: |
+          echo "BAATX_API_BASE_URL=${{ secrets.BAATX_API_BASE_URL }}" > keystore.properties
+          
+      - name: Generate Gradle Wrapper
+        run: gradle wrapper
+        
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+        
+      - name: Assemble APK
+        run: ./gradlew assembleDebug --no-daemon
+        
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baatx-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 7

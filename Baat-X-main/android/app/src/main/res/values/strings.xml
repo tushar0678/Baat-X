@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">BaatX</string>
+    <string name="tagline">You talk. BaatX remembers, updates, and reminds.</string>
+    <string name="privacy_message">We don\'t store your recordings. We extract what matters and update your CRM.</string>
+    <string name="tell_ai">Tell AI</string>
+    <string name="import_call_recording">Import Call Recording</string>
+    <string name="import_audio">Import Audio</string>
+    <string name="error_generic">Something went wrong. Please try again.</string>
+    <string name="error_network">Internet connection was lost. We\'ll continue when you\'re back online.</string>
+    <string name="error_audio_format">This audio format isn\'t supported. Please select MP3, M4A, WAV, AAC, AMR, or OGG.</string>
+    <string name="error_processing">Something went wrong while processing your recording. Please try again.</string>
+    <string name="waiting_for_internet">Waiting for internet…</string>
+</resources>
