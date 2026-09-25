@@ -23,11 +23,12 @@ from app.auth.permissions import Permission, effective_permissions
 from app.auth.rbac import ScopeFilter, scope_filter
 from app.auth.security import decode_token
 from app.core.errors import AuthenticationError, AuthorizationError
-from app.db.session import get_session
+from app.db.session import get_db
 from app.models.enums import OrgRole
 from app.models.tenancy import Business, BusinessMembership, Team, User
 
-DbDep = Annotated[AsyncSession, Depends(get_session)]
+
+DbDep = Annotated[AsyncSession, Depends(get_db)]
 
 
 @dataclass(slots=True)
