@@ -16,8 +16,7 @@ from app.auth.permissions import effective_permissions
 from app.auth.rbac import VisibilityScope
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.models.enums import OrgRole
-from app.models.tenancy import Business, BusinessMembership, Invitation, Team
-from app.models.user import User
+from app.models.tenancy import Business, BusinessMembership, Invitation, Team, User
 from app.repositories.audit_repo import AuditRepository
 from app.schemas.organization import (
     AcceptInvitationRequest,
