@@ -5,15 +5,25 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
+import com.baatx.core.org.OrgContext
+import com.baatx.data.local.BaatXDatabase
 import com.baatx.work.SyncScheduler
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 @HiltAndroidApp
 class BaatXApplication : Application(), Configuration.Provider {
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
     @Inject lateinit var syncScheduler: SyncScheduler
+    @Inject lateinit var orgContext: OrgContext
+    @Inject lateinit var database: BaatXDatabase
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder().setWorkerFactory(workerFactory).build()
@@ -21,8 +31,27 @@ class BaatXApplication : Application(), Configuration.Provider {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
+
         // Anything captured offline is retried as soon as connectivity returns.
         syncScheduler.schedulePeriodicSync()
+
+        clearCachedDataOnOrgSwitch()
+    }
+
+    /**
+     * Nothing from the previous organization may survive a switch.
+     *
+     * The server already refuses cross-tenant requests, but a stale local
+     * cache would still *display* the old organization's customers and
+     * follow-ups until the next refresh - which looks exactly like a leak to
+     * the person holding the phone.
+     */
+    private fun clearCachedDataOnOrgSwitch() {
+        orgContext.addSwitchListener {
+            appScope.launch {
+                database.clearAllTables()
+            }
+        }
     }
 
     private fun createNotificationChannels() {

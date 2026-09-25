@@ -6,7 +6,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request, status
 
 from app.auth.deps import CurrentUser, DbDep, requires
-from app.auth.rbac import can_read_all
+from app.auth.rbac import scope_filter
+from app.core.errors import NotFoundError
 from app.core.pagination import Page, PageParams
 from app.repositories.audit_repo import AuditRepository
 from app.schemas.crm import (
@@ -25,6 +26,15 @@ def _service(db, principal: CurrentUser) -> CustomerService:  # noqa: ANN001
     return CustomerService(db, principal.business_id, principal.business.country_code)
 
 
+def _not_found() -> NotFoundError:
+    """Same error whether the customer doesn't exist or isn't yours.
+
+    The old code raised 403 here, which confirmed the record existed under
+    another owner - enough to enumerate a colleague's book by id.
+    """
+    return NotFoundError("customer not found", user_message="We couldn't find that customer.")
+
+
 @router.get("", response_model=Page[CustomerResponse], summary="List and search customers")
 async def list_customers(
     db: DbDep,
@@ -32,9 +42,14 @@ async def list_customers(
     filters: Annotated[CustomerListFilters, Depends()],
     params: Annotated[PageParams, Depends()],
 ) -> Page[CustomerResponse]:
-    restrict = None if can_read_all(principal.role) else principal.user_id
+    """Search runs inside the caller's scope.
+
+    ``filters.owner_user_id`` narrows the result but cannot widen it - asking
+    for a colleague's id returns an empty page rather than their customers.
+    """
+    scope = scope_filter(principal.role, principal.user_id)
     return await _service(db, principal).list_customers(
-        filters, params, restrict_to_user_id=restrict
+        filters, params, restrict_to_user_ids=scope.user_ids
     )
 
 
@@ -45,7 +60,12 @@ async def create_customer(
     principal: Annotated[CurrentUser, requires("customer:write")],
     payload: CustomerCreate,
 ) -> CustomerResponse:
+    # Handing a new customer to someone else is an assignment, not a create.
+    if payload.owner_user_id and payload.owner_user_id != principal.user_id:
+        principal.require("customer:assign")
+
     customer = await _service(db, principal).create(payload, actor_id=principal.user_id)
+
     await AuditRepository(db, principal.business_id).record(
         action="customer.created",
         actor_user_id=principal.user_id,
@@ -62,10 +82,12 @@ async def get_customer(
     principal: Annotated[CurrentUser, requires("customer:read")],
     customer_id: uuid.UUID,
 ) -> CustomerResponse:
-    service = _service(db, principal)
-    customer = await service.customers.get_or_404(customer_id)
-    if not can_read_all(principal.role) and customer.owner_user_id != principal.user_id:
-        principal.require("customer:read_all")  # raises 403 for salespeople
+    scope = scope_filter(principal.role, principal.user_id)
+    customer = await _service(db, principal).customers.get_or_404(customer_id)
+
+    if not scope.allows(customer):
+        raise _not_found()
+
     return CustomerService.to_response(customer)
 
 
@@ -77,9 +99,20 @@ async def update_customer(
     customer_id: uuid.UUID,
     payload: CustomerUpdate,
 ) -> CustomerResponse:
-    customer = await _service(db, principal).update(
-        customer_id, payload, actor_id=principal.user_id
-    )
+    scope = scope_filter(principal.role, principal.user_id)
+    service = _service(db, principal)
+
+    existing = await service.customers.get_or_404(customer_id)
+    if not scope.allows(existing):
+        raise _not_found()
+
+    # Reassignment is a distinct privilege from editing: a member may correct
+    # their own customer's details without being able to move them away.
+    if payload.owner_user_id and payload.owner_user_id != existing.owner_user_id:
+        principal.require("customer:assign")
+
+    customer = await service.update(customer_id, payload, actor_id=principal.user_id)
+
     await AuditRepository(db, principal.business_id).record(
         action="customer.updated",
         actor_user_id=principal.user_id,
@@ -102,4 +135,13 @@ async def customer_timeline(
     customer_id: uuid.UUID,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> CustomerTimelineResponse:
-    return await _service(db, principal).timeline(customer_id, limit=limit)
+    """The timeline is the richest view in the CRM - summaries, budgets,
+    objections. It was previously reachable by id with no ownership check."""
+    scope = scope_filter(principal.role, principal.user_id)
+    service = _service(db, principal)
+
+    customer = await service.customers.get_or_404(customer_id)
+    if not scope.allows(customer):
+        raise _not_found()
+
+    return await service.timeline(customer_id, limit=limit)

@@ -1,6 +1,7 @@
 package com.baatx.core.network
 
 import com.baatx.BuildConfig
+import com.baatx.core.org.OrgInterceptor
 import com.baatx.data.remote.*
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
 import dagger.Module
@@ -31,9 +32,14 @@ object NetworkModule {
     @Singleton
     fun okHttp(
         authInterceptor: AuthInterceptor,
+        orgInterceptor: OrgInterceptor,
         authenticator: TokenAuthenticator,
     ): OkHttpClient = OkHttpClient.Builder()
         .addInterceptor(authInterceptor)
+        // After auth, so the token is already attached. Stamps the active
+        // organization; the server re-verifies membership regardless, so a
+        // tampered header gets a 403 rather than another tenant's data.
+        .addInterceptor(orgInterceptor)
         .authenticator(authenticator)
         .apply {
             if (BuildConfig.DEBUG) {
@@ -77,4 +83,8 @@ object NetworkModule {
 
     @Provides @Singleton
     fun whatsAppApi(retrofit: Retrofit): WhatsAppApi = retrofit.create(WhatsAppApi::class.java)
+
+    @Provides @Singleton
+    fun organizationApi(retrofit: Retrofit): OrganizationApi =
+        retrofit.create(OrganizationApi::class.java)
 }

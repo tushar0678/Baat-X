@@ -4,9 +4,40 @@ from enum import StrEnum
 
 
 class Role(StrEnum):
+    """Legacy single-business role.
+
+    Superseded by :class:`OrgRole`, which lives on the membership rather than
+    the user, so the same person can hold different roles in different
+    organizations. Kept so existing rows and un-migrated call sites keep
+    working; new code should use ``OrgRole``.
+    """
+
     OWNER = "owner"
     ADMIN = "admin"
     SALESPERSON = "salesperson"
+
+
+class OrgRole(StrEnum):
+    """A user's role *within one organization*.
+
+    Roles seed a default permission set; they are not the authorization model
+    itself. Every check asks for a permission, and a manager may extend or trim
+    any member's defaults. See ``app.auth.permissions``.
+    """
+
+    OWNER = "owner"
+    MANAGER = "manager"
+    TEAM_LEAD = "team_lead"
+    MEMBER = "member"
+    VIEWER = "viewer"
+
+
+# Maps the old per-user role onto the new per-membership one during migration.
+LEGACY_ROLE_MAP: dict[Role, OrgRole] = {
+    Role.OWNER: OrgRole.OWNER,
+    Role.ADMIN: OrgRole.MANAGER,
+    Role.SALESPERSON: OrgRole.MEMBER,
+}
 
 
 class BusinessVertical(StrEnum):
@@ -28,8 +59,13 @@ class LeadStatus(StrEnum):
 
 
 FUNNEL_ORDER: dict[LeadStatus, int] = {
-    LeadStatus.NEW: 0, LeadStatus.CONTACTED: 1, LeadStatus.INTERESTED: 2,
-    LeadStatus.FOLLOW_UP: 3, LeadStatus.HOT: 4, LeadStatus.CONVERTED: 5, LeadStatus.LOST: 6,
+    LeadStatus.NEW: 0,
+    LeadStatus.CONTACTED: 1,
+    LeadStatus.INTERESTED: 2,
+    LeadStatus.FOLLOW_UP: 3,
+    LeadStatus.HOT: 4,
+    LeadStatus.CONVERTED: 5,
+    LeadStatus.LOST: 6,
 }
 
 
