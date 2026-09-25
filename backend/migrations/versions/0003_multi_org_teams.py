@@ -102,24 +102,27 @@ def upgrade() -> None:
     # ------------------------------------------------------------- backfill
     connection = op.get_bind()
 
-    # Every existing user gets a membership, so nobody is locked out.
-    connection.execute(
-        sa.text(
-            """
-            INSERT INTO business_memberships (id, business_id, user_id, role, is_active)
-            SELECT gen_random_uuid(), b.id, u.id,
-                   CASE u.role
-                       WHEN 'owner' THEN 'owner'
-                       WHEN 'admin' THEN 'manager'
-                       ELSE 'member'
-                   END,
-                   true
-            FROM businesses b
-            JOIN users u ON u.business_id = b.id
-            ON CONFLICT (business_id, user_id) DO NOTHING
-            """
-        )
-    )
+    # # Every existing user gets a membership, so nobody is locked out.
+    # connection.execute(
+    #     sa.text(
+    #         """
+    #         INSERT INTO business_memberships (id, business_id, user_id, role, is_active)
+    #         SELECT gen_random_uuid(), b.id, u.id,
+    #                CASE u.role
+    #                    WHEN 'owner' THEN 'owner'
+    #                    WHEN 'admin' THEN 'manager'
+    #                    ELSE 'member'
+    #                END,
+    #                true
+    #         FROM businesses b
+    #         JOIN users u ON u.business_id = b.id
+    #         ON CONFLICT (business_id, user_id) DO NOTHING
+    #         """
+    #     )
+    # )
+
+
+
 
     # Guarantee at least one owner per organization.
     connection.execute(
