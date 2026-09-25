@@ -1,8 +1,14 @@
 """Natural-language CRM assistant.
 
-The LLM only classifies intent; every answer is produced by a real, tenant-scoped
-SQL query. Destructive intents (creating a follow-up, changing a lead status)
-return a confirmation token and are executed only when the user sends it back.
+The LLM only classifies intent; every answer is produced by a real, scoped SQL
+query. Destructive intents return a confirmation token and run only when the
+user sends it back.
+
+Scoping is the whole point of this module's plumbing. The assistant is the
+easiest place in the product to leak data: a salesperson can simply *ask* for
+something they cannot reach through any screen. So every query here - reads,
+lookups and writes alike - is filtered by the caller's own ``ScopeFilter``.
+There is no "assistant mode" that sees more than the caller does.
 """
 
 from __future__ import annotations
@@ -14,9 +20,10 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.rbac import ScopeFilter, VisibilityScope
 from app.config.logging import get_logger
 from app.core.phone import mask_phone
 from app.core.timeparse import resolve_follow_up_datetime
@@ -26,18 +33,25 @@ from app.models.enums import FollowUpType, LeadStatus, QueryCategory
 from app.models.followup import FollowUp
 from app.repositories.customer_repo import CustomerRepository
 from app.repositories.followup_repo import ACTIVE_STATUSES, FollowUpRepository
-from app.repositories.lead_repo import LeadRepository
-from app.schemas.assistant import AssistantAction, AssistantQueryRequest, AssistantQueryResponse
+from app.schemas.assistant import AssistantQueryRequest, AssistantQueryResponse
 from app.schemas.followup import FollowUpCreate
 from app.services.ai.base import LLMProvider
 from app.services.ai.prompts import ASSISTANT_SYSTEM_PROMPT
 from app.services.crm.customer_service import CustomerService
 from app.services.reminders.followup_service import FollowUpService
-from app.services.reports.report_service import ReportService
 
 log = get_logger(__name__)
 
 DESTRUCTIVE_INTENTS = {"create_followup", "update_lead_status"}
+
+# Ownership columns, per model. ``assigned_user_id`` is the Lead/FollowUp
+# spelling in this codebase - using the wrong name here would silently disable
+# the filter rather than raise.
+_OWNER_COLUMN = {
+    Customer: "owner_user_id",
+    FollowUp: "assigned_user_id",
+    ConversationEvent: "created_by_user_id",
+}
 
 
 class AssistantService:
@@ -47,45 +61,69 @@ class AssistantService:
         business_id: uuid.UUID,
         *,
         llm: LLMProvider,
+        scope: ScopeFilter,
         timezone: str = "Asia/Kolkata",
-        user_id: uuid.UUID | None = None,
-        restrict_to_user: bool = False,
     ) -> None:
         self.session = session
         self.business_id = business_id
         self.llm = llm
+        self.scope = scope
+        self.user_id = scope.user_id
         self.tz = ZoneInfo(timezone)
-        self.user_id = user_id
-        self.restrict = restrict_to_user
+
         self.customers = CustomerRepository(session, business_id)
         self.follow_ups = FollowUpRepository(session, business_id)
-        self.leads = LeadRepository(session, business_id)
         self.customer_service = CustomerService(session, business_id)
         self.follow_up_service = FollowUpService(session, business_id, timezone)
-        self.reports = ReportService(session, business_id, timezone=timezone, llm=llm)
+
+    # ---------------- scoping ----------------
+
+    def _scoped(self, stmt: Select, model) -> Select:  # noqa: ANN001
+        """Tenant filter always; ownership filter unless the caller is org-wide.
+
+        Falls back to ``team_id`` when the model carries one, so a team lead
+        still sees a record that was reassigned within their team.
+        """
+        stmt = stmt.where(model.business_id == self.business_id)
+
+        if self.scope.unrestricted:
+            return stmt
+
+        allowed = self.scope.user_ids or {self.user_id}
+        column_name = _OWNER_COLUMN.get(model)
+        column = getattr(model, column_name, None) if column_name else None
+
+        if column is None:
+            return stmt
+
+        if self.scope.scope is VisibilityScope.TEAM and self.scope.team_ids:
+            team_column = getattr(model, "team_id", None)
+            if team_column is not None:
+                from sqlalchemy import or_
+
+                return stmt.where(
+                    or_(column.in_(allowed), team_column.in_(self.scope.team_ids))
+                )
+
+        return stmt.where(column.in_(allowed))
+
+    # ---------------- entry point ----------------
 
     async def handle(self, request: AssistantQueryRequest) -> AssistantQueryResponse:
         intent, parameters, destructive, restatement = await self._classify(request.query)
 
         if destructive or intent in DESTRUCTIVE_INTENTS:
-            token = _confirm_token(self.business_id, intent, parameters)
+            token = _confirm_token(self.business_id, self.user_id, intent, parameters)
             if request.confirm_token != token:
                 return AssistantQueryResponse(
                     answer=f"{restatement} Should I go ahead?".strip(),
                     kind="confirmation_required",
-                    action=AssistantAction(
-                        intent=intent,
-                        description=restatement,
-                        parameters=parameters,
-                        destructive=True,
-                    ),
                     confirm_token=token,
                 )
             return await self._execute(intent, parameters)
 
         return await self._answer(intent, parameters)
 
-    # ---------------- intent ----------------
     async def _classify(self, query: str) -> tuple[str, dict, bool, str]:
         try:
             result = await self.llm.complete_json(
@@ -105,6 +143,7 @@ class AssistantService:
             return "unsupported", {}, False, ""
 
     # ---------------- read intents ----------------
+
     async def _answer(self, intent: str, p: dict) -> AssistantQueryResponse:
         now = datetime.now(self.tz)
 
@@ -113,13 +152,14 @@ class AssistantService:
                 customer = await self._find_customer(p.get("customer_name"))
                 if customer is None:
                     return _not_found(p.get("customer_name"))
-                stmt = (
-                    select(ConversationEvent)
-                    .where(ConversationEvent.business_id == self.business_id)
-                    .where(ConversationEvent.customer_id == customer.id)
-                    .order_by(ConversationEvent.occurred_at.desc())
-                    .limit(1)
-                )
+
+                stmt = self._scoped(
+                    select(ConversationEvent).where(
+                        ConversationEvent.customer_id == customer.id
+                    ),
+                    ConversationEvent,
+                ).order_by(ConversationEvent.occurred_at.desc()).limit(1)
+
                 event = (await self.session.execute(stmt)).scalars().first()
                 if event is None:
                     return AssistantQueryResponse(
@@ -129,7 +169,8 @@ class AssistantService:
                 return AssistantQueryResponse(
                     answer=(
                         f"Last conversation with {customer.name} on "
-                        f"{event.occurred_at:%d %b %Y}: {event.summary or 'no summary recorded'}"
+                        f"{event.occurred_at:%d %b %Y}: "
+                        f"{event.summary or 'no summary recorded'}"
                     ),
                     data=[{"highlights": event.highlights or {}, "at": str(event.occurred_at)}],
                     is_ai_generated=False,
@@ -151,11 +192,17 @@ class AssistantService:
                         )
                     start = resolved.due_at.replace(hour=0, minute=0, second=0, microsecond=0)
                     label = f"{start:%A, %d %b}"
-                rows = await self.follow_ups.list_between(
-                    start,
-                    start + timedelta(days=1),
-                    assigned_user_id=self.user_id if self.restrict else None,
-                )
+
+                stmt = self._scoped(
+                    select(FollowUp).where(
+                        FollowUp.due_at >= start,
+                        FollowUp.due_at < start + timedelta(days=1),
+                        FollowUp.status.in_(ACTIVE_STATUSES),
+                    ),
+                    FollowUp,
+                ).order_by(FollowUp.due_at.asc())
+
+                rows = (await self.session.execute(stmt)).scalars().all()
                 return AssistantQueryResponse(
                     answer=f"{len(rows)} follow-up(s) scheduled for {label}.",
                     data=[await self._follow_up_row(f) for f in rows],
@@ -163,11 +210,12 @@ class AssistantService:
                 )
 
             case "customers_by_budget":
-                stmt = select(Customer).where(Customer.business_id == self.business_id)
+                stmt = self._scoped(select(Customer), Customer)
                 if (minimum := p.get("min_amount")) is not None:
                     stmt = stmt.where(Customer.budget_max >= Decimal(str(minimum)))
                 if (maximum := p.get("max_amount")) is not None:
                     stmt = stmt.where(Customer.budget_min <= Decimal(str(maximum)))
+
                 rows = (
                     await self.session.execute(
                         stmt.order_by(Customer.budget_max.desc().nullslast()).limit(25)
@@ -187,15 +235,12 @@ class AssistantService:
                         answer="Which status did you mean - new, interested, hot, or converted?",
                         kind="confirmation_required",
                     )
-                rows = (
-                    await self.session.execute(
-                        select(Customer)
-                        .where(Customer.business_id == self.business_id)
-                        .where(Customer.lead_status == status)
-                        .order_by(Customer.updated_at.desc())
-                        .limit(25)
-                    )
-                ).scalars().all()
+
+                stmt = self._scoped(
+                    select(Customer).where(Customer.lead_status == status), Customer
+                ).order_by(Customer.updated_at.desc()).limit(25)
+
+                rows = (await self.session.execute(stmt)).scalars().all()
                 return AssistantQueryResponse(
                     answer=f"{len(rows)} customer(s) are marked {status.value}.",
                     data=[self._customer_row(c) for c in rows],
@@ -203,20 +248,18 @@ class AssistantService:
                 )
 
             case "customers_with_price_concern":
-                rows = (
-                    await self.session.execute(
-                        select(Customer)
-                        .join(ConversationEvent, ConversationEvent.customer_id == Customer.id)
-                        .where(Customer.business_id == self.business_id)
-                        .where(
-                            ConversationEvent.primary_query_category.in_(
-                                [QueryCategory.PRICING, QueryCategory.DISCOUNT]
-                            )
+                stmt = self._scoped(
+                    select(Customer)
+                    .join(ConversationEvent, ConversationEvent.customer_id == Customer.id)
+                    .where(
+                        ConversationEvent.primary_query_category.in_(
+                            [QueryCategory.PRICING, QueryCategory.DISCOUNT]
                         )
-                        .order_by(Customer.updated_at.desc())
-                        .limit(25)
-                    )
-                ).scalars().unique().all()
+                    ),
+                    Customer,
+                ).order_by(Customer.updated_at.desc()).limit(25)
+
+                rows = (await self.session.execute(stmt)).scalars().unique().all()
                 return AssistantQueryResponse(
                     answer=f"{len(rows)} customer(s) raised pricing or discount concerns.",
                     data=[self._customer_row(c) for c in rows],
@@ -224,17 +267,19 @@ class AssistantService:
                 )
 
             case "customers_requested_callback":
-                rows = (
-                    await self.session.execute(
-                        select(FollowUp, Customer)
-                        .join(Customer, Customer.id == FollowUp.customer_id)
-                        .where(FollowUp.business_id == self.business_id)
-                        .where(FollowUp.customer_requested_callback.is_(True))
-                        .where(FollowUp.status.in_(ACTIVE_STATUSES))
-                        .order_by(FollowUp.due_at.asc())
-                        .limit(25)
-                    )
-                ).all()
+                # Scoped on the follow-up: whoever owes the callback is the one
+                # who should be reminded of it.
+                stmt = self._scoped(
+                    select(FollowUp, Customer)
+                    .join(Customer, Customer.id == FollowUp.customer_id)
+                    .where(
+                        FollowUp.customer_requested_callback.is_(True),
+                        FollowUp.status.in_(ACTIVE_STATUSES),
+                    ),
+                    FollowUp,
+                ).order_by(FollowUp.due_at.asc()).limit(25)
+
+                rows = (await self.session.execute(stmt)).all()
                 return AssistantQueryResponse(
                     answer=f"{len(rows)} customer(s) have requested a callback.",
                     data=[
@@ -246,34 +291,66 @@ class AssistantService:
 
             case "conversion_count":
                 start, end = self._window(p.get("period", "this_month"))
-                count = await self.leads.count_conversions(start, end)
-                total, converted = await self.leads.total_and_converted()
-                rate = round((converted / total) * 100, 2) if total else 0.0
+
+                # Counts leak too: a total that includes rows the caller can't
+                # open still tells them those rows exist.
+                converted = await self._count(
+                    self._scoped(
+                        select(Customer).where(
+                            Customer.lead_status == LeadStatus.CONVERTED,
+                            Customer.updated_at >= start,
+                            Customer.updated_at < end,
+                        ),
+                        Customer,
+                    )
+                )
+                visible_total = await self._count(self._scoped(select(Customer), Customer))
+                all_converted = await self._count(
+                    self._scoped(
+                        select(Customer).where(Customer.lead_status == LeadStatus.CONVERTED),
+                        Customer,
+                    )
+                )
+                rate = round((all_converted / visible_total) * 100, 2) if visible_total else 0.0
+
+                scope_label = {
+                    VisibilityScope.ORG: "across the organization",
+                    VisibilityScope.TEAM: "across your team",
+                    VisibilityScope.OWN: "from your own leads",
+                }[self.scope.scope]
+
                 return AssistantQueryResponse(
                     answer=(
-                        f"{count} lead(s) converted in that period. "
-                        f"Overall conversion rate is {rate}%."
+                        f"{converted} lead(s) converted in that period {scope_label}. "
+                        f"Conversion rate is {rate}%."
                     ),
-                    data=[{"converted": count, "overall_rate": rate}],
+                    data=[{"converted": converted, "overall_rate": rate}],
                     is_ai_generated=False,
                 )
 
             case "query_summary":
-                period = p.get("period", "this_week")
-                report = (
-                    await self.reports.daily(with_insights=False)
-                    if period == "today"
-                    else await self.reports.period("weekly", with_insights=False)
+                start, end = self._window(p.get("period", "this_week"))
+
+                stmt = self._scoped(
+                    select(ConversationEvent).where(
+                        ConversationEvent.occurred_at >= start,
+                        ConversationEvent.occurred_at < end,
+                    ),
+                    ConversationEvent,
                 )
-                queries = report.queries
+                events = (await self.session.execute(stmt)).scalars().all()
+
+                counts: dict[str, int] = {}
+                for event in events:
+                    for category in event.query_categories or []:
+                        counts[str(category)] = counts.get(str(category), 0) + 1
+
                 return AssistantQueryResponse(
                     answer=(
-                        f"{queries.total_queries} customer queries recorded - "
-                        f"{queries.price_concerns} about price, "
-                        f"{queries.availability_queries} about availability, "
-                        f"{queries.quotations_requested} quotation requests."
+                        f"{len(events)} conversation(s) recorded in that period, "
+                        f"with {sum(counts.values())} customer queries."
                     ),
-                    data=[{"by_category": {k.value: v for k, v in queries.by_category.items()}}],
+                    data=[{"by_category": counts}],
                     is_ai_generated=False,
                 )
 
@@ -287,9 +364,15 @@ class AssistantService:
                 )
 
     # ---------------- write intents ----------------
+
     async def _execute(self, intent: str, p: dict) -> AssistantQueryResponse:
         customer = await self._find_customer(p.get("customer_name"))
         if customer is None:
+            return _not_found(p.get("customer_name"))
+
+        # Belt and braces: _find_customer is already scoped, but a write must
+        # never rest on a single upstream filter being correct.
+        if not self.scope.allows(customer):
             return _not_found(p.get("customer_name"))
 
         if intent == "create_followup":
@@ -301,6 +384,7 @@ class AssistantService:
                     answer="I couldn't work out that date. Which day should I set?",
                     kind="confirmation_required",
                 )
+
             follow_up = await self.follow_up_service.create(
                 FollowUpCreate(
                     customer_id=customer.id,
@@ -342,11 +426,29 @@ class AssistantService:
         return AssistantQueryResponse(answer="I can't do that yet.", kind="unsupported")
 
     # ---------------- helpers ----------------
+
     async def _find_customer(self, name: str | None) -> Customer | None:
+        """Name lookup, restricted to what the caller may see.
+
+        Deliberately not the repository's fuzzy search: that is tenant-scoped
+        only, so a colleague's customer would resolve by name. Here an
+        out-of-scope name simply doesn't exist.
+        """
         if not name:
             return None
-        matches = await self.customers.find_by_name_fuzzy(str(name), limit=1)
-        return matches[0] if matches else None
+
+        stmt = self._scoped(
+            select(Customer).where(Customer.name.ilike(f"%{str(name).strip()}%")), Customer
+        ).order_by(Customer.updated_at.desc()).limit(1)
+
+        return (await self.session.execute(stmt)).scalars().first()
+
+    async def _count(self, stmt: Select) -> int:
+        from sqlalchemy import func
+
+        return await self.session.scalar(
+            select(func.count()).select_from(stmt.subquery())
+        ) or 0
 
     def _window(self, period: str) -> tuple[datetime, datetime]:
         now = datetime.now(self.tz)
@@ -383,15 +485,28 @@ class AssistantService:
         }
 
 
-def _confirm_token(business_id: uuid.UUID, intent: str, parameters: dict) -> str:
-    """Deterministic per (tenant, intent, params) so a replay can't be repurposed."""
+def _confirm_token(
+    business_id: uuid.UUID, user_id: uuid.UUID | None, intent: str, parameters: dict
+) -> str:
+    """Deterministic per (tenant, user, intent, params).
+
+    ``user_id`` is in the hash so a token cannot be replayed by a different
+    member to execute an action they were never offered.
+    """
     raw = json.dumps(
-        {"b": str(business_id), "i": intent, "p": parameters}, sort_keys=True, default=str
+        {"b": str(business_id), "u": str(user_id), "i": intent, "p": parameters},
+        sort_keys=True,
+        default=str,
     )
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 def _not_found(name: str | None) -> AssistantQueryResponse:
+    """One message for "no such customer" and "not yours".
+
+    Distinguishing the two would confirm the customer exists elsewhere in the
+    organization, which is itself a disclosure.
+    """
     return AssistantQueryResponse(
         answer=(
             f"I couldn't find a customer called {name}."

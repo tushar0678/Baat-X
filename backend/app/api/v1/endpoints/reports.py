@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.auth.deps import CurrentUser, DbDep, requires
-from app.auth.rbac import can_read_all
+from app.auth.rbac import scope_filter
 from app.schemas.report import DailyReportResponse, DashboardResponse, PeriodReportResponse
 from app.services.ai.factory import llm_provider
 from app.services.reports.report_service import ReportService
@@ -24,9 +24,8 @@ def _service(db, principal: CurrentUser) -> ReportService:  # noqa: ANN001
 async def dashboard(
     db: DbDep, principal: Annotated[CurrentUser, requires("report:read")]
 ) -> DashboardResponse:
-    return await _service(db, principal).dashboard(
-        user_id=principal.user_id, restrict=not can_read_all(principal.role)
-    )
+    scope = scope_filter(principal.role, principal.user_id)
+    return await _service(db, principal).dashboard(user_ids=scope.user_ids)
 
 
 @router.get("/reports/daily", response_model=DailyReportResponse)
@@ -36,7 +35,17 @@ async def daily_report(
     report_date: Annotated[date | None, Query(alias="date")] = None,
     insights: Annotated[bool, Query()] = True,
 ) -> DailyReportResponse:
-    return await _service(db, principal).daily(report_date, with_insights=insights)
+    """A salesperson's daily report covers their own day, not the whole business.
+
+    Reports were previously unscoped entirely: every count, every "top
+    requirement" and every named follow-up came from the full organization.
+    That made the reports endpoint a complete read of the CRM for anyone who
+    could call it - including the customer names in ``important_follow_ups``.
+    """
+    scope = scope_filter(principal.role, principal.user_id)
+    return await _service(db, principal).daily(
+        report_date, with_insights=insights, user_ids=scope.user_ids
+    )
 
 
 @router.get("/reports/weekly", response_model=PeriodReportResponse)
@@ -46,7 +55,10 @@ async def weekly_report(
     anchor: Annotated[date | None, Query()] = None,
     insights: Annotated[bool, Query()] = True,
 ) -> PeriodReportResponse:
-    return await _service(db, principal).period("weekly", anchor, with_insights=insights)
+    scope = scope_filter(principal.role, principal.user_id)
+    return await _service(db, principal).period(
+        "weekly", anchor, with_insights=insights, user_ids=scope.user_ids
+    )
 
 
 @router.get("/reports/monthly", response_model=PeriodReportResponse)
@@ -56,4 +68,7 @@ async def monthly_report(
     anchor: Annotated[date | None, Query()] = None,
     insights: Annotated[bool, Query()] = True,
 ) -> PeriodReportResponse:
-    return await _service(db, principal).period("monthly", anchor, with_insights=insights)
+    scope = scope_filter(principal.role, principal.user_id)
+    return await _service(db, principal).period(
+        "monthly", anchor, with_insights=insights, user_ids=scope.user_ids
+    )

@@ -6,8 +6,10 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Request, status
 
 from app.auth.deps import CurrentUser, DbDep, requires
-from app.auth.rbac import can_read_all
+from app.auth.rbac import scope_filter
+from app.core.errors import NotFoundError
 from app.repositories.audit_repo import AuditRepository
+from app.repositories.customer_repo import CustomerRepository
 from app.schemas.followup import (
     FollowUpBoard,
     FollowUpCreate,
@@ -26,6 +28,10 @@ def _service(db, principal: CurrentUser) -> FollowUpService:  # noqa: ANN001
     return FollowUpService(db, principal.business_id, principal.business.timezone)
 
 
+def _not_found() -> NotFoundError:
+    return NotFoundError("follow-up not found", user_message="We couldn't find that follow-up.")
+
+
 @router.get(
     "/follow-ups",
     response_model=FollowUpBoard,
@@ -36,8 +42,12 @@ async def board(
     principal: Annotated[CurrentUser, requires("followup:read")],
     mine_only: Annotated[bool, Query()] = False,
 ) -> FollowUpBoard:
-    restrict = principal.user_id if (mine_only or not can_read_all(principal.role)) else None
-    return await _service(db, principal).board(assigned_user_id=restrict)
+    scope = scope_filter(principal.role, principal.user_id)
+
+    # ``mine_only`` can narrow the board but never widen it: a member asking
+    # for everything still gets their own.
+    user_ids = {principal.user_id} if mine_only else scope.user_ids
+    return await _service(db, principal).board(assigned_user_ids=user_ids)
 
 
 @router.post("/follow-ups", response_model=FollowUpResponse, status_code=status.HTTP_201_CREATED)
@@ -47,8 +57,21 @@ async def create_follow_up(
     principal: Annotated[CurrentUser, requires("followup:write")],
     payload: FollowUpCreate,
 ) -> FollowUpResponse:
+    scope = scope_filter(principal.role, principal.user_id)
+
+    # A follow-up names a customer. Creating one against a customer you can't
+    # open would confirm they exist and let you attach yourself to them.
+    customer = await CustomerRepository(db, principal.business_id).get_or_404(payload.customer_id)
+    if not scope.allows(customer):
+        raise NotFoundError("customer not found", user_message="We couldn't find that customer.")
+
+    # Assigning work to someone else is a separate privilege from creating it.
+    if payload.assigned_user_id and payload.assigned_user_id != principal.user_id:
+        principal.require("followup:assign")
+
     service = _service(db, principal)
     follow_up = await service.create(payload, actor_id=principal.user_id)
+
     await AuditRepository(db, principal.business_id).record(
         action="followup.created",
         actor_user_id=principal.user_id,
@@ -67,8 +90,21 @@ async def update_follow_up(
     follow_up_id: uuid.UUID,
     payload: FollowUpUpdate,
 ) -> FollowUpResponse:
+    scope = scope_filter(principal.role, principal.user_id)
     service = _service(db, principal)
+
+    existing = await service.follow_ups.get_or_404(follow_up_id)
+
+    # Previously any member could complete, reschedule or cancel a colleague's
+    # follow-up - silently losing them the reminder.
+    if not scope.allows(existing):
+        raise _not_found()
+
+    if payload.assigned_user_id and payload.assigned_user_id != existing.assigned_user_id:
+        principal.require("followup:assign")
+
     follow_up = await service.update(follow_up_id, payload, actor_id=principal.user_id)
+
     await AuditRepository(db, principal.business_id).record(
         action="followup.updated",
         actor_user_id=principal.user_id,
@@ -88,7 +124,9 @@ async def update_follow_up(
 async def suggestions(
     db: DbDep, principal: Annotated[CurrentUser, requires("followup:read")]
 ) -> list[SmartSuggestion]:
-    return await _service(db, principal).smart_suggestions()
+    """Suggestions name customers, so they are scoped like everything else."""
+    scope = scope_filter(principal.role, principal.user_id)
+    return await _service(db, principal).smart_suggestions(user_ids=scope.user_ids)
 
 
 @router.get("/notifications", response_model=list[NotificationResponse], tags=["Notifications"])
@@ -113,5 +151,14 @@ async def mark_read(
     principal: Annotated[CurrentUser, requires("followup:read")],
     notification_id: uuid.UUID,
 ) -> NotificationResponse:
+    """Marking read returns the notification body, so the recipient check is
+    a read-authorization check, not just a tidiness one."""
     service = NotificationService(db, principal.business_id)
+    notification = await service.get_or_404(notification_id)
+
+    if notification.user_id != principal.user_id:
+        raise NotFoundError(
+            "notification not found", user_message="We couldn't find that notification."
+        )
+
     return NotificationResponse.model_validate(await service.mark_read(notification_id))
