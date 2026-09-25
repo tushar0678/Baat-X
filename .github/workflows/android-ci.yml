@@ -7,28 +7,22 @@ on:
     paths: ["android/**", ".github/workflows/android-ci.yml"]
   workflow_dispatch:
 permissions:
-  contents: write   # needed once to auto-commit the wrapper if it's missing
+  contents: write   
 defaults:
   run:
     working-directory: android
+concurrency:
+  group: android-ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  # ==========================================
-  # JOB 0: ENSURE WRAPPER (self-healing, no local machine needed)
-  # ==========================================
-  # If gradlew/gradle-wrapper.jar are already committed, this job just
-  # validates their checksum and does nothing else. If they are missing
-  # (e.g. first run after this pipeline change), it generates them on
-  # GitHub's runner - never on your local machine, so the PowerShell
-  # execution-policy error you hit locally cannot happen here - and commits
-  # them back so every future run (and every teammate) gets the pinned
-  # version instead of the runner's system Gradle.
+
   ensure-wrapper:
     name: Ensure Gradle Wrapper
     runs-on: ubuntu-latest
-    outputs:
-      generated: ${{ steps.check.outputs.generated }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Check whether wrapper already exists
         id: check
@@ -50,7 +44,7 @@ jobs:
 
       - name: Generate wrapper (first run only)
         if: steps.check.outputs.generated == 'true'
-        run: gradle wrapper --gradle-version 8.9
+        run: gradle wrapper --gradle-version 8.11.1
 
       - name: Commit generated wrapper
         if: steps.check.outputs.generated == 'true'
@@ -63,21 +57,28 @@ jobs:
 
       # Validates the wrapper jar's checksum against Gradle's official
       # signature - protects against a tampered wrapper being committed or
-      # injected upstream. Runs whether the wrapper was just generated above
-      # or already existed from a previous run.
+      # injected upstream.
       - uses: gradle/actions/wrapper-validation@v4
 
   # ==========================================
-  # JOB 1: LINT (Code Quality Check)
+  # JOB 1: LINT + TEST + BUILD (merged into one job)
   # ==========================================
-  lint:
-    name: Code Quality (Lint)
+  # Previously three separate jobs, each paying its own checkout / Java
+  # setup / Gradle cache-restore cost and each re-running a fresh `gradlew`
+  # invocation from scratch. Running all three tasks in a single Gradle
+  # invocation lets Gradle configure the project once and share the
+  # upstream tasks (compileDebugKotlin, kspDebugKotlin, resource merging,
+  # etc.) across lint, unit tests, and the APK build instead of redoing
+  # them three times - this is the biggest time saver here.
+  build-and-verify:
+    name: Lint, Test & Build APK
     needs: ensure-wrapper
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref || github.ref }}   # picks up the wrapper commit above
+          fetch-depth: 1
 
       - uses: actions/setup-java@v4
         with:
@@ -94,80 +95,16 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Run Static Analysis
-        run: ./gradlew lintDebug --no-daemon
+      - name: Lint, test and assemble (single Gradle invocation)
+        run: ./gradlew lintDebug testDebugUnitTest assembleDebug --no-daemon --build-cache --parallel
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-lint-report
-          path: android/app/build/reports/lint-results-*.html
-
-  # ==========================================
-  # JOB 2: TEST (Unit Testing)
-  # ==========================================
-  test:
-    name: Unit Tests
-    needs: lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref }}
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: gradle/actions/wrapper-validation@v4
-      - uses: gradle/actions/setup-gradle@v4
-
-      - name: Inject Secrets into keystore.properties
-        run: |
-          echo "BAATX_API_BASE_URL=${{ secrets.BAATX_API_BASE_URL }}" > keystore.properties
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Run Unit Tests
-        run: ./gradlew testDebugUnitTest --no-daemon
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: android-test-reports
-          path: android/app/build/reports/**
-
-  # ==========================================
-  # JOB 3: BUILD APK (Generates the App)
-  # ==========================================
-  build-apk:
-    name: Build Debug APK
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref }}
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: gradle/actions/wrapper-validation@v4
-      - uses: gradle/actions/setup-gradle@v4
-
-      - name: Inject Secrets into keystore.properties
-        run: |
-          echo "BAATX_API_BASE_URL=${{ secrets.BAATX_API_BASE_URL }}" > keystore.properties
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Assemble APK
-        run: ./gradlew assembleDebug --no-daemon
+          name: android-reports
+          path: |
+            android/app/build/reports/lint-results-*.html
+            android/app/build/reports/tests/**
 
       - uses: actions/upload-artifact@v4
         with:

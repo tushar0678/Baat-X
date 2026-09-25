@@ -1,15 +1,17 @@
-"""Organizations, teams and membership - the spine of BaatX multi-tenancy.
+"""Users, organizations, teams and membership - the spine of BaatX multi-tenancy.
 
-A ``Business`` is the tenant. Every CRM row already carries ``business_id`` via
-``TenantMixin``; this module adds the *structure inside* a tenant - teams, a
-manager/lead/member hierarchy, and the memberships that decide who sees what.
+``User`` is a person's global identity (one row per human, one password, one
+email). A ``Business`` is a tenant/organization. The two are linked only
+through ``BusinessMembership`` - a user has no access to any tenant except
+through an active membership row, and the same person can hold a different
+role in every organization they belong to.
 
 Two rules this file exists to enforce:
 
 1. A user reaches CRM data only through a ``BusinessMembership``. No membership,
    no access - there is no other door.
-2. Role and team live on the membership, not on the user. The same person can
-   be a manager in one organization and a salesperson in another.
+2. A user's role and team live on the membership, not on the user. The same
+   person can be a manager in one organization and a salesperson in another.
 """
 
 from __future__ import annotations
@@ -17,11 +19,50 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import GUID, Base, JSONBCompat, TenantMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import BusinessVertical, OrgRole
+
+
+class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A person's account. Global - not scoped to any one organization.
+
+    Belongs to zero or more businesses via ``BusinessMembership``. Deleting a
+    business never deletes the user; removing a membership just revokes that
+    one organization's access.
+    """
+
+    __tablename__ = "users"
+
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    full_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    phone: Mapped[str | None] = mapped_column(String(32))
+    locale: Mapped[str] = mapped_column(String(10), default="en-IN", nullable=False)
+
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Bumped on password change / "log out everywhere" - every previously
+    # issued access and refresh token embeds the version it was signed with,
+    # so a mismatch invalidates it immediately without a revocation list.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    memberships: Mapped[list[BusinessMembership]] = relationship(
+        back_populates="user", lazy="selectin"
+    )
 
 
 class Business(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -108,47 +149,4 @@ class BusinessMembership(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base)
     # Purely cosmetic - it never affects authorization.
     job_title: Mapped[str | None] = mapped_column(String(80))
 
-    # Per-user overrides on top of the role's defaults. Grants are additive;
-    # revocations win. Empty means "just use the role".
-    granted_permissions: Mapped[list | None] = mapped_column(JSONBCompat)
-    revoked_permissions: Mapped[list | None] = mapped_column(JSONBCompat)
-
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    joined_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-
-    business: Mapped[Business] = relationship(back_populates="memberships")
-    team: Mapped[Team | None] = relationship(back_populates="memberships")
-
-
-class Invitation(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
-    """A pending invite to join an organization."""
-
-    __tablename__ = "invitations"
-    __table_args__ = (
-        Index("ix_invitations_business_status", "business_id", "status"),
-        Index("ix_invitations_token", "token", unique=True),
-    )
-
-    email: Mapped[str | None] = mapped_column(String(255), index=True)
-    phone: Mapped[str | None] = mapped_column(String(32), index=True)
-
-    role: Mapped[OrgRole] = mapped_column(String(24), default=OrgRole.MEMBER, nullable=False)
-    team_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("teams.id", ondelete="SET NULL")
-    )
-    job_title: Mapped[str | None] = mapped_column(String(80))
-
-    # Random and single-use.
-    token: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    invited_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("users.id", ondelete="SET NULL")
-    )
-    accepted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("users.id", ondelete="SET NULL")
-    )
-    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Per-user overrides
