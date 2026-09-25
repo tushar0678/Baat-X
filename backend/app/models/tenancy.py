@@ -149,4 +149,48 @@ class BusinessMembership(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base)
     # Purely cosmetic - it never affects authorization.
     job_title: Mapped[str | None] = mapped_column(String(80))
 
-    # Per-user overrides
+    # Per-user overrides on top of the role's defaults. Grants are additive;
+    # revocations win. Empty means "just use the role".
+    granted_permissions: Mapped[list | None] = mapped_column(JSONBCompat)
+    revoked_permissions: Mapped[list | None] = mapped_column(JSONBCompat)
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped[User] = relationship(back_populates="memberships")
+    business: Mapped[Business] = relationship(back_populates="memberships")
+    team: Mapped[Team | None] = relationship(back_populates="memberships")
+
+
+class Invitation(UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin, Base):
+    """A pending invite to join an organization."""
+
+    __tablename__ = "invitations"
+    __table_args__ = (
+        Index("ix_invitations_business_status", "business_id", "status"),
+        Index("ix_invitations_token", "token", unique=True),
+    )
+
+    email: Mapped[str | None] = mapped_column(String(255), index=True)
+    phone: Mapped[str | None] = mapped_column(String(32), index=True)
+
+    role: Mapped[OrgRole] = mapped_column(String(24), default=OrgRole.MEMBER, nullable=False)
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("teams.id", ondelete="SET NULL")
+    )
+    job_title: Mapped[str | None] = mapped_column(String(80))
+
+    # Random and single-use.
+    token: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    invited_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    accepted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
