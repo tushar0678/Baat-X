@@ -6,8 +6,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -32,6 +32,7 @@ import com.baatx.features.customers.CustomerDetailScreen
 import com.baatx.features.customers.CustomersScreen
 import com.baatx.features.followups.FollowUpsScreen
 import com.baatx.features.home.HomeScreen
+import com.baatx.features.org.TeamManagementScreen
 import com.baatx.features.reports.ReportsScreen
 import com.baatx.features.settings.SettingsScreen
 import com.baatx.features.tellai.AiReviewScreen
@@ -49,6 +50,7 @@ object Routes {
     const val REVIEW = "review/{jobId}"
     const val ASSISTANT = "assistant"
     const val CALL_SYNC = "call-sync/{callId}"
+    const val TEAMS = "teams"
 
     fun customerDetail(id: String) = "customers/$id"
     fun review(jobId: String) = "review/$jobId"
@@ -132,7 +134,7 @@ private fun SignedInScaffold(
             }
         },
         floatingActionButton = {
-            // Tell AI is the primary action and stays prominent everywhere (§40).
+            // Tell AI is the primary action and stays prominent everywhere.
             if (showChrome) {
                 ExtendedFloatingActionButton(
                     onClick = { navController.navigate(Routes.TELL_AI) },
@@ -176,7 +178,14 @@ private fun SignedInScaffold(
                 composable(Routes.REPORTS) { ReportsScreen() }
 
                 composable(Routes.MORE) {
-                    SettingsScreen(onOpenAssistant = { navController.navigate(Routes.ASSISTANT) })
+                    SettingsScreen(
+                        onOpenAssistant = { navController.navigate(Routes.ASSISTANT) },
+                        onOpenTeams = { navController.navigate(Routes.TEAMS) },
+                    )
+                }
+
+                composable(Routes.TEAMS) {
+                    TeamManagementScreen(onBack = { navController.popBackStack() })
                 }
 
                 composable(Routes.ASSISTANT) {

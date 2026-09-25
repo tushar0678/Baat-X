@@ -10,6 +10,7 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class RepositoryModule {
+
     @Binds @Singleton
     abstract fun authRepository(impl: AuthRepositoryImpl): AuthRepository
 
@@ -33,4 +34,7 @@ abstract class RepositoryModule {
 
     @Binds @Singleton
     abstract fun whatsAppRepository(impl: WhatsAppRepositoryImpl): WhatsAppRepository
+
+    @Binds @Singleton
+    abstract fun organizationRepository(impl: OrganizationRepositoryImpl): OrganizationRepository
 }
