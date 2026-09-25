@@ -63,23 +63,18 @@ class AuthRepositoryImpl @Inject constructor(
             userName = user.fullName,
         )
 
-        // Seed the organization context from the account we just signed into,
-        // so the very first request already carries the right tenant.
         val business = user.businesses.firstOrNull { it.id == businessId }
         if (businessId != null && business != null) {
             orgContext.switchTo(
                 orgId = businessId,
                 orgName = business.name,
                 role = business.role,
-                // Permissions arrive from /organizations/current; until then the
-                // UI hides nothing extra, and the server enforces regardless.
                 permissions = emptySet(),
             )
         }
         return user
     }
 
-    /** Clearing the org context too, so the next account never inherits this one. */
     override fun signOut() {
         tokenStore.clear()
         orgContext.clear()
@@ -96,11 +91,6 @@ class ConversationRepositoryImpl @Inject constructor(
     private val syncScheduler: SyncScheduler,
 ) : ConversationRepository {
 
-    /**
-     * Offline-first: the capture is written to the local queue first, so a lost
-     * network can never lose a conversation. If we're online we submit
-     * immediately; otherwise WorkManager picks it up when connectivity returns.
-     */
     override suspend fun tellAi(
         text: String,
         customerId: String?,
@@ -120,7 +110,7 @@ class ConversationRepositoryImpl @Inject constructor(
 
         if (!connectivity.currentlyOnline()) {
             syncScheduler.requestImmediateSync()
-            return ApiResult.Success(null)   // "Waiting for internet…"
+            return ApiResult.Success(null)
         }
 
         val result = safeApiCall {
@@ -149,8 +139,6 @@ class ConversationRepositoryImpl @Inject constructor(
         nameHint: String?,
     ): ApiResult<ProcessingJob?> {
         val key = UUID.randomUUID().toString()
-        // The contact is queued alongside the audio, so an upload that only
-        // succeeds tomorrow still lands on the right customer.
         dao.insert(
             PendingCaptureEntity(
                 id = key,
@@ -190,7 +178,7 @@ class ConversationRepositoryImpl @Inject constructor(
 
         if (result is ApiResult.Success) {
             dao.delete(key)
-            file.delete()   // the local copy is temporary too
+            file.delete()
         } else {
             syncScheduler.requestImmediateSync()
         }
@@ -231,7 +219,9 @@ class ConversationRepositoryImpl @Inject constructor(
 }
 
 @Singleton
-class CustomerRepositoryImpl @Inject constructor(private val api: CrmApi) : CustomerRepository {
+class CustomerRepositoryImpl @Inject constructor(
+    private val api: CrmApi,
+) : CustomerRepository {
 
     override suspend fun list(search: String?, status: LeadStatus?, page: Int) =
         safeApiCall {
@@ -242,13 +232,16 @@ class CustomerRepositoryImpl @Inject constructor(private val api: CrmApi) : Cust
             )
         }.map { result -> result.items.map { it.toDomain() } }
 
-    override suspend fun get(id: String) = safeApiCall { api.customer(id) }.map { it.toDomain() }
+    override suspend fun get(id: String) =
+        safeApiCall { api.customer(id) }.map { it.toDomain() }
 
     override suspend fun timeline(id: String) = safeApiCall { api.timeline(id) }
 }
 
 @Singleton
-class LeadRepositoryImpl @Inject constructor(private val api: CrmApi) : LeadRepository {
+class LeadRepositoryImpl @Inject constructor(
+    private val api: CrmApi,
+) : LeadRepository {
 
     override suspend fun list(status: LeadStatus?) =
         safeApiCall { api.leads(status = status?.apiValue) }.map { it.items }
@@ -256,10 +249,14 @@ class LeadRepositoryImpl @Inject constructor(private val api: CrmApi) : LeadRepo
     override suspend fun funnel() = safeApiCall { api.funnel() }
 
     override suspend fun updateStatus(leadId: String, status: LeadStatus): ApiResult<Unit> =
-        safeApiCall { api.updateLeadStatus(leadId, mapOf("status" to status.apiValue)) }.map { }
+        safeApiCall {
+            api.updateLeadStatus(leadId, mapOf("status" to status.apiValue))
+        }.map { }
 
     override suspend fun convert(leadId: String, note: String?): ApiResult<Unit> =
-        safeApiCall { api.convert(leadId, buildMap { note?.let { put("note", it) } }) }.map { }
+        safeApiCall {
+            api.convert(leadId, buildMap { note?.let { put("note", it) } })
+        }.map { }
 }
 
 @Singleton
@@ -271,13 +268,19 @@ class FollowUpRepositoryImpl @Inject constructor(
         safeApiCall { api.board(mineOnly) }.map { it.toDomain() }
 
     override suspend fun markDone(id: String): ApiResult<Unit> =
-        safeApiCall { api.update(id, FollowUpUpdateRequest(status = "completed")) }.map { }
+        safeApiCall {
+            api.update(id, FollowUpUpdateRequest(status = "completed"))
+        }.map { }
 
     override suspend fun reschedule(id: String, dueAtIso: String): ApiResult<Unit> =
-        safeApiCall { api.update(id, FollowUpUpdateRequest(dueAt = dueAtIso)) }.map { }
+        safeApiCall {
+            api.update(id, FollowUpUpdateRequest(dueAt = dueAtIso))
+        }.map { }
 
     override suspend fun cancel(id: String): ApiResult<Unit> =
-        safeApiCall { api.update(id, FollowUpUpdateRequest(status = "cancelled")) }.map { }
+        safeApiCall {
+            api.update(id, FollowUpUpdateRequest(status = "cancelled"))
+        }.map { }
 
     override suspend fun create(
         customerId: String,
@@ -297,7 +300,9 @@ class FollowUpRepositoryImpl @Inject constructor(
 }
 
 @Singleton
-class ReportRepositoryImpl @Inject constructor(private val api: ReportApi) : ReportRepository {
+class ReportRepositoryImpl @Inject constructor(
+    private val api: ReportApi,
+) : ReportRepository {
     override suspend fun dashboard() = safeApiCall { api.dashboard() }.map { it.toDomain() }
     override suspend fun daily() = safeApiCall { api.daily() }
     override suspend fun weekly() = safeApiCall { api.weekly() }
@@ -320,7 +325,6 @@ class WhatsAppRepositoryImpl @Inject constructor(
     override suspend fun draft(customerId: String) =
         safeApiCall { api.draft(WhatsAppDraftRequest(customerId)) }
 
-    /** `approved = true` is only ever set here, after the user taps Send. */
     override suspend fun send(messageId: String, editedBody: String?): ApiResult<Unit> =
         safeApiCall {
             api.send(
@@ -338,20 +342,31 @@ class OrganizationRepositoryImpl @Inject constructor(
     private val api: OrganizationApi,
 ) : OrganizationRepository {
 
-    override suspend fun myOrganizations() = safeApiCall { api.myOrganizations() }
+    override suspend fun myOrganizations() =
+        safeApiCall { api.myOrganizations() }
 
-    override suspend fun current() = safeApiCall { api.current() }
+    override suspend fun current() =
+        safeApiCall { api.current() }
 
     override suspend fun activate(organizationId: String) =
         safeApiCall { api.activate(organizationId) }
 
     override suspend fun createOrganization(name: String, vertical: String) =
-        safeApiCall { api.createOrganization(CreateOrganizationRequest(name, vertical)) }
+        safeApiCall {
+            api.createOrganization(CreateOrganizationRequest(name, vertical))
+        }
 
     override suspend fun teams() = safeApiCall { api.teams() }
 
     override suspend fun createTeam(name: String, leadUserId: String?) =
-        safeApiCall { api.createTeam(CreateTeamRequest(name = name, leadUserId = leadUserId)) }
+        safeApiCall {
+            api.createTeam(
+                CreateTeamRequest(
+                    name = name,
+                    leadUserId = leadUserId,
+                ),
+            )
+        }
 
     override suspend fun members() = safeApiCall { api.members() }
 
@@ -359,24 +374,45 @@ class OrganizationRepositoryImpl @Inject constructor(
         membershipId: String,
         role: String?,
         teamId: String?,
-    ) = safeApiCall { api.updateMember(membershipId, UpdateMemberRequest(role, teamId)) }
+    ) = safeApiCall {
+        api.updateMember(
+            membershipId,
+            UpdateMemberRequest(
+                role = role,
+                teamId = teamId,
+            ),
+        )
+    }
 
     override suspend fun removeMember(membershipId: String): ApiResult<Unit> =
         safeApiCall { api.removeMember(membershipId) }.map { }
 
-    /**
-     * An '@' is a good enough signal to pick the field; if it's wrong the
-     * server's validation rejects it, which is the right place for that
-     * decision to live.
-     */
-    override suspend fun invite(contact: String, role: String, teamId: String?) =
+    override suspend fun invite(
+        contact: String,
+        role: String,
+        teamId: String?,
+    ) = safeApiCall {
+        api.invite(
+            if (contact.contains("@")) {
+                InviteMemberRequest(
+                    email = contact,
+                    role = role,
+                    teamId = teamId,
+                )
+            } else {
+                InviteMemberRequest(
+                    phone = contact,
+                    role = role,
+                    teamId = teamId,
+                )
+            },
+        )
+    }
+
+    override suspend fun acceptInvitation(token: String) =
         safeApiCall {
-            api.invite(
-                if (contact.contains("@")) {
-                    InviteMemberRequest(email = contact, role = role, teamId = teamId)
-                } else {
-                    InviteMemberRequest(phone = contact, role = role, teamId = teamId)
-                },
+            api.acceptInvitation(
+                AcceptInvitationRequest(token = token),
             )
         }
 }

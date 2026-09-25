@@ -6,9 +6,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -70,56 +71,115 @@ fun SettingsScreen(
 
     var showOrgSwitcher by remember { mutableStateOf(false) }
 
-    // Call sync only turns on once the permissions are actually granted; a
-    // silently half-working feature would be worse than none.
+    val scrollState = rememberScrollState()
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { granted ->
-        callSyncViewModel.setEnabled(granted[Manifest.permission.READ_PHONE_STATE] == true)
+        callSyncViewModel.setEnabled(
+            granted[Manifest.permission.READ_PHONE_STATE] == true,
+        )
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("More") }) }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("More") },
+            )
+        },
+    ) { padding ->
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(scrollState),
+        ) {
 
             ListItem(
-                headlineContent = { Text(organizationName ?: "Your organization") },
-                supportingContent = { Text(role?.roleLabel() ?: "Tap to switch") },
-                leadingContent = { Icon(Icons.Default.Business, contentDescription = null) },
-                modifier = Modifier.clickable { showOrgSwitcher = true },
+                headlineContent = {
+                    Text(organizationName ?: "Your organization")
+                },
+                supportingContent = {
+                    Text(role?.roleLabel() ?: "Tap to switch")
+                },
+                leadingContent = {
+                    Icon(
+                        Icons.Default.Business,
+                        contentDescription = null,
+                    )
+                },
+                modifier = Modifier.clickable {
+                    showOrgSwitcher = true
+                },
             )
+
             HorizontalDivider()
 
             ListItem(
-                headlineContent = { Text("Teams & people") },
-                supportingContent = { Text("Manage teams, roles and invitations") },
-                leadingContent = { Icon(Icons.Default.Groups, contentDescription = null) },
-                modifier = Modifier.clickable(onClick = onOpenTeams),
+                headlineContent = {
+                    Text("Teams & people")
+                },
+                supportingContent = {
+                    Text("Manage teams, roles and invitations")
+                },
+                leadingContent = {
+                    Icon(
+                        Icons.Default.Groups,
+                        contentDescription = null,
+                    )
+                },
+                modifier = Modifier.clickable(
+                    onClick = onOpenTeams,
+                ),
             )
+
             HorizontalDivider()
 
             ListItem(
-                headlineContent = { Text("Ask BaatX") },
-                supportingContent = { Text("Natural-language questions about your CRM") },
-                leadingContent = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
-                modifier = Modifier.clickable(onClick = onOpenAssistant),
+                headlineContent = {
+                    Text("Ask BaatX")
+                },
+                supportingContent = {
+                    Text("Natural-language questions about your CRM")
+                },
+                leadingContent = {
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                    )
+                },
+                modifier = Modifier.clickable(
+                    onClick = onOpenAssistant,
+                ),
             )
+
             HorizontalDivider()
 
             ListItem(
-                headlineContent = { Text("Sync calls automatically") },
+                headlineContent = {
+                    Text("Sync calls automatically")
+                },
                 supportingContent = {
                     Text(
                         "After a call ends, BaatX asks if you want to attach its recording. " +
-                            "It never records calls and never uploads anything on its own.",
+                                "It never records calls and never uploads anything on its own.",
                     )
                 },
-                leadingContent = { Icon(Icons.Default.PhoneCallback, contentDescription = null) },
+                leadingContent = {
+                    Icon(
+                        Icons.Default.PhoneCallback,
+                        contentDescription = null,
+                    )
+                },
                 trailingContent = {
                     Switch(
                         checked = callSyncEnabled,
                         onCheckedChange = { wanted ->
                             if (wanted) {
-                                permissionLauncher.launch(callSyncPermissions())
+                                permissionLauncher.launch(
+                                    callSyncPermissions(),
+                                )
                             } else {
                                 callSyncViewModel.setEnabled(false)
                             }
@@ -127,52 +187,100 @@ fun SettingsScreen(
                     )
                 },
             )
+
             HorizontalDivider()
 
             ListItem(
-                headlineContent = { Text("Privacy") },
+                headlineContent = {
+                    Text("Privacy")
+                },
                 supportingContent = {
                     Text(
-                        "We don't store your recordings. We extract what matters and " +
-                            "update your CRM.",
+                        "We don't store your recordings. We extract what matters and update your CRM.",
                     )
                 },
-                leadingContent = { Icon(Icons.Default.Shield, contentDescription = null) },
+                leadingContent = {
+                    Icon(
+                        Icons.Default.Shield,
+                        contentDescription = null,
+                    )
+                },
             )
+
             HorizontalDivider()
 
             viewModel.currentUserName()?.let { name ->
                 ListItem(
-                    headlineContent = { Text("Signed in as") },
-                    supportingContent = { Text(name) },
+                    headlineContent = {
+                        Text("Signed in as")
+                    },
+                    supportingContent = {
+                        Text(name)
+                    },
                 )
+
                 HorizontalDivider()
             }
 
             ListItem(
-                headlineContent = { Text("Sign out") },
-                leadingContent = {
-                    Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
+                headlineContent = {
+                    Text("Sign out")
                 },
-                modifier = Modifier.clickable { viewModel.signOut() },
+                leadingContent = {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Logout,
+                        contentDescription = null,
+                    )
+                },
+                modifier = Modifier.clickable {
+                    viewModel.signOut()
+                },
             )
 
-            Spacer(Modifier.weight(1f))
-            Text(
-                "BaatX 1.0.0 — You talk. BaatX remembers, updates, and reminds.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            HorizontalDivider()
+
+            Column(
                 modifier = Modifier.padding(16.dp),
-            )
+            ) {
+
+                Text(
+                    text = "BaatX CRM",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+
+                Text(
+                    text = "You talk. BaatX remembers, updates, and reminds.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                Text(
+                    text = "Version 1.0.0",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+
+                Text(
+                    text = "Developed & Designed by Tushar Shukla",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
         }
 
         if (showOrgSwitcher) {
             OrgSwitcherSheet(
-                onDismiss = { showOrgSwitcher = false },
-                onCreateOrganization = { showOrgSwitcher = false },
-                // OrgContext's switch listener clears cached data, so there is
-                // nothing to do here but close the sheet.
-                onSwitched = { showOrgSwitcher = false },
+                onDismiss = {
+                    showOrgSwitcher = false
+                },
+                onCreateOrganization = {
+                    showOrgSwitcher = false
+                },
+                onSwitched = {
+                    showOrgSwitcher = false
+                },
             )
         }
     }
@@ -182,6 +290,7 @@ private fun callSyncPermissions(): Array<String> = buildList {
     add(Manifest.permission.READ_PHONE_STATE)
     add(Manifest.permission.READ_CALL_LOG)
     add(Manifest.permission.READ_CONTACTS)
+
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         add(Manifest.permission.POST_NOTIFICATIONS)
     }
