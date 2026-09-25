@@ -26,7 +26,239 @@ baatx/
 ├── docker-compose.yml  Postgres + Redis + Azurite + API + worker
 └── .env.example
 ```
+Hierarchy Structure
 
+I recommend this hierarchy for BaatX CRM:
+
+Plain Text
+Owner
+│
+├── Manager
+│ │
+│ ├── Team Lead
+│ │ │
+│ │ ├── Salesperson
+│ │ ├── Salesperson
+│ │ └── Salesperson
+│ │
+│ └── Team Lead
+│ ├── Salesperson
+│ └── Salesperson
+│
+└── Viewer
+Show more lines
+1. OWNER
+Who?
+
+Business owner, company founder, CRM administrator.
+
+Scope
+Plain Text
+Entire Organization
+Show more lines
+
+Can see:
+
+✅ All customers
+ ✅ All leads
+ ✅ All follow-ups
+ ✅ All recordings
+ ✅ All reports
+ ✅ All teams
+ ✅ All users
+
+Can do
+
+✅ Create teams
+
+✅ Invite users
+
+✅ Promote managers
+
+✅ Create another owner
+
+✅ Assign permissions
+
+✅ Remove users
+
+✅ Change company settings
+
+Example:
+
+Plain Text
+GHM Real Estate Owner
+↓
+Can see all 500 leads
+Show more lines
+2. MANAGER
+Who?
+
+Branch manager / sales manager.
+
+Scope
+Plain Text
+Entire Organization
+Show more lines
+
+Can see:
+
+✅ All teams
+
+✅ All leads
+
+✅ All customers
+
+✅ All reports
+
+But cannot:
+
+❌ Delete company
+
+❌ Transfer ownership
+
+❌ Create another owner
+
+Example
+
+Plain Text
+Delhi Sales Manager
+Show more lines
+
+can see
+
+Plain Text
+North Team
+South Team
+East Team
+West Team
+Show more lines
+
+all together.
+
+3. TEAM LEAD
+Who?
+
+Sales leader.
+
+Scope
+Plain Text
+Own Team Only
+Show more lines
+
+Can see:
+
+✅ Own leads
+
+✅ Team member leads
+
+✅ Team follow-ups
+
+✅ Team reports
+
+Cannot see:
+
+❌ Other team data
+
+Example
+
+Plain Text
+Team Lead = Rahul
+ 
+Team:
+Aman
+Suraj
+Rakesh
+Show more lines
+
+Rahul can see:
+
+Plain Text
+Aman leads
+Suraj leads
+Rakesh leads
+Rahul leads
+Show more lines
+
+But cannot see:
+
+Plain Text
+Priya Team
+Ankit Team
+Show more lines
+4. MEMBER / SALESPERSON
+Who?
+
+Actual salesperson.
+
+Scope
+Plain Text
+Only Own Records
+Show more lines
+
+Can see:
+
+✅ Own customers
+
+✅ Own leads
+
+✅ Own follow-ups
+
+✅ Own call recordings
+
+Cannot see:
+
+❌ Team lead records
+
+❌ Colleague records
+
+❌ Other teams
+
+❌ Organization reports
+
+Example
+
+Plain Text
+Salesperson = Aman
+Show more lines
+
+Aman can see only:
+
+Plain Text
+Lead A
+Lead B
+Lead C
+Show more lines
+
+Created/assigned to Aman.
+
+5. VIEWER
+Who?
+
+HR, auditor, CEO assistant.
+
+Scope
+Plain Text
+Read Only
+Show more lines
+
+Can see data.
+
+Cannot:
+
+❌ Edit
+
+❌ Delete
+
+❌ Create
+
+❌ Reassign
+
+Data Visibility Matrix
+Role	Own Data	Team Data	Org Data	Manage UsersOwner	✅	✅	✅	✅
+Manager	✅	✅	✅	✅
+Team Lead	✅	✅	❌	Limited
+Member	✅	❌	❌	❌
+Viewer	✅	Depends	Depends	❌
 ---
 
 ## Quick start (local)
