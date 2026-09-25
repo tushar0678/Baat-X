@@ -21,12 +21,11 @@ from sqlalchemy.orm import selectinload
 
 from app.auth.permissions import Permission, effective_permissions
 from app.auth.rbac import ScopeFilter, scope_filter
-from app.auth.tokens import decode_access_token
+from app.auth.security import decode_token
 from app.core.errors import AuthenticationError, AuthorizationError
 from app.db.session import get_session
 from app.models.enums import OrgRole
-from app.models.tenancy import Business, BusinessMembership, Team
-from app.models.user import User
+from app.models.tenancy import Business, BusinessMembership, Team, User
 
 DbDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -180,12 +179,20 @@ async def get_current_user(
     if not authorization or not authorization.lower().startswith("bearer "):
         raise AuthenticationError("missing bearer token")
 
-    claims = decode_access_token(authorization.split(" ", 1)[1].strip())
-    user_id = uuid.UUID(claims["sub"])
+    # decode_token returns a TokenPayload dataclass (not a raw dict), and
+    # already raises AuthenticationError on an expired/invalid/wrong-type
+    # token - see app.auth.security.decode_token.
+    payload = decode_token(authorization.split(" ", 1)[1].strip(), expected_type="access")
+    user_id = payload.user_id
 
     user = await db.get(User, user_id)
     if user is None or not user.is_active:
         raise AuthenticationError("user not found or disabled")
+
+    # A bumped token_version (password change / "log out everywhere") must
+    # invalidate every token issued before it, even if it hasn't expired yet.
+    if payload.token_version != user.token_version:
+        raise AuthenticationError("token has been revoked")
 
     requested_business_id: uuid.UUID | None = None
     if x_organization_id:
@@ -196,11 +203,8 @@ async def get_current_user(
                 "malformed organization id",
                 user_message="We couldn't switch organizations. Please try again.",
             ) from None
-    elif claims.get("biz"):
-        requested_business_id = uuid.UUID(claims["biz"])
-    elif user.business_id:
-        # Single-business accounts created before organizations existed.
-        requested_business_id = user.business_id
+    elif payload.business_id:
+        requested_business_id = payload.business_id
 
     if requested_business_id is None:
         raise AuthorizationError(
