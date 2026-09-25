@@ -58,6 +58,15 @@ class PermissionError_(BaatXError):
     user_message = "You don't have permission to do this."
 
 
+# Alias used by the multi-organization authorization layer (deps.py, rbac.py,
+# and the scoped endpoints). Kept as a plain alias - not a subclass - so
+# `isinstance(exc, PermissionError_)` and `isinstance(exc, AuthorizationError)`
+# are both true for the same exception, and the existing FastAPI exception
+# handler (registered for `PermissionError_`) catches it without needing a
+# second handler registration.
+AuthorizationError = PermissionError_
+
+
 class TenantIsolationError(PermissionError_):
     code = "tenant_isolation"
     user_message = "You don't have access to this record."
