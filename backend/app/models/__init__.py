@@ -11,14 +11,31 @@ from app.models.conversation import AIExtraction, AIProcessingJob, ConversationE
 from app.models.crm import ConversionEvent, Customer, Lead, LeadStatusTransition
 from app.models.followup import FollowUp, Notification, Task
 from app.models.reports import QueryCategoryStat, ReportMetric, ReportSnapshot
-from app.models.tenancy import Business, BusinessMembership, Team, Invitation
-from app.models.user import User
+from app.models.tenancy import Business, BusinessMembership, Invitation, Team, User
 from app.models.whatsapp import WhatsAppMessage
 
 __all__ = [
-    "AIExtraction", "AIProcessingJob", "AuditLog", "Base", "Business",
-    "BusinessMembership", "ConversationEvent", "ConversionEvent", "Customer",
-    "FollowUp", "Lead", "LeadStatusTransition", "Notification",
-    "QueryCategoryStat", "ReportMetric", "ReportSnapshot", "Subscription",
-    "Task", "UsageRecord", "User", "WhatsAppMessage",
+    "AIExtraction",
+    "AIProcessingJob",
+    "AuditLog",
+    "Base",
+    "Business",
+    "BusinessMembership",
+    "ConversationEvent",
+    "ConversionEvent",
+    "Customer",
+    "FollowUp",
+    "Invitation",
+    "Lead",
+    "LeadStatusTransition",
+    "Notification",
+    "QueryCategoryStat",
+    "ReportMetric",
+    "ReportSnapshot",
+    "Subscription",
+    "Task",
+    "Team",
+    "UsageRecord",
+    "User",
+    "WhatsAppMessage",
 ]
