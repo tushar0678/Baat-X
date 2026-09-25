@@ -1,11 +1,13 @@
 name: Android CI
 on:
-  push:
-    branches: [main, develop]
-    paths: ["android/**", ".github/workflows/android-ci.yml"]
-  pull_request:
-    paths: ["android/**", ".github/workflows/android-ci.yml"]
   workflow_dispatch:
+# --- automatic triggers disabled - uncomment to re-enable ---
+# on:
+#   push:
+#     branches: [main, develop]
+#     paths: ["android/**", ".github/workflows/android-ci.yml"]
+#   pull_request:
+#     paths: ["android/**", ".github/workflows/android-ci.yml"]
 permissions:
   contents: write   
 defaults:
