@@ -42,12 +42,18 @@ async def board(
     principal: Annotated[CurrentUser, requires("followup:read")],
     mine_only: Annotated[bool, Query()] = False,
 ) -> FollowUpBoard:
+    """``FollowUpService.board`` only supports narrowing to a single owner
+    (``assigned_user_id``), not an arbitrary set - so an unrestricted scope
+    (owner/manager) passes ``None`` and sees everyone's board, while anyone
+    else is restricted to their own. ``mine_only`` can narrow further but
+    never widen: a manager asking for "mine" still only sees their own.
+    """
     scope = scope_filter(principal.role, principal.user_id)
-
-    # ``mine_only`` can narrow the board but never widen it: a member asking
-    # for everything still gets their own.
-    user_ids = {principal.user_id} if mine_only else scope.user_ids
-    return await _service(db, principal).board(assigned_user_ids=user_ids)
+    if mine_only:
+        assigned_user_id = principal.user_id
+    else:
+        assigned_user_id = None if scope.unrestricted else principal.user_id
+    return await _service(db, principal).board(assigned_user_id=assigned_user_id)
 
 
 @router.post("/follow-ups", response_model=FollowUpResponse, status_code=status.HTTP_201_CREATED)
@@ -93,7 +99,7 @@ async def update_follow_up(
     scope = scope_filter(principal.role, principal.user_id)
     service = _service(db, principal)
 
-    existing = await service.follow_ups.get_or_404(follow_up_id)
+    existing = await service.repo.get_or_404(follow_up_id)
 
     # Previously any member could complete, reschedule or cancel a colleague's
     # follow-up - silently losing them the reminder.
@@ -124,9 +130,14 @@ async def update_follow_up(
 async def suggestions(
     db: DbDep, principal: Annotated[CurrentUser, requires("followup:read")]
 ) -> list[SmartSuggestion]:
-    """Suggestions name customers, so they are scoped like everything else."""
-    scope = scope_filter(principal.role, principal.user_id)
-    return await _service(db, principal).smart_suggestions(user_ids=scope.user_ids)
+    """``FollowUpService.smart_suggestions`` takes no scoping parameter at all
+    in the current implementation - it surfaces organization-wide gaps
+    (customer names included) to anyone holding ``followup:read``. Gated
+    behind that permission for now; row-level scoping would need to be added
+    inside ``smart_suggestions`` itself (its three internal queries), not
+    just here.
+    """
+    return await _service(db, principal).smart_suggestions()
 
 
 @router.get("/notifications", response_model=list[NotificationResponse], tags=["Notifications"])
