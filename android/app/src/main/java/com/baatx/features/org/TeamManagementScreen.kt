@@ -4,12 +4,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material3.*
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,17 +53,42 @@ class TeamManagementViewModel @Inject constructor(
     val state: StateFlow<TeamManagementUiState> = _state.asStateFlow()
 
     init {
-        // Mirrored permissions only decide which buttons appear. Every action
-        // is authorized again on the server.
+        load()
+    }
+
+    /**
+     * Refreshes permissions from the server before deciding which buttons to
+     * show, then loads teams and members.
+     *
+     * This matters because login/signup deliberately seed `OrgContext` with
+     * an empty permission set (the server enforces every action regardless
+     * of what the client shows), and nothing else ever refreshed it. Without
+     * this call, `orgContext.can(TEAM_MANAGE)` stayed false forever - even
+     * for an owner - and the "New team" / "Invite" actions silently never
+     * appeared, though the underlying APIs worked fine.
+     */
+    fun load() = viewModelScope.launch {
+        _state.value = _state.value.copy(isLoading = true, error = null)
+
+        when (val current = repository.current()) {
+            is ApiResult.Success -> {
+                orgContext.switchTo(
+                    orgId = current.data.id,
+                    orgName = current.data.name,
+                    role = current.data.role,
+                    permissions = current.data.permissions.toSet(),
+                )
+            }
+            is ApiResult.Failure -> {
+                // Non-fatal: fall back to whatever OrgContext already has
+                // rather than blocking the whole screen on this refresh.
+            }
+        }
+
         _state.value = _state.value.copy(
             canManageTeams = orgContext.can(Permissions.TEAM_MANAGE),
             canManageUsers = orgContext.can(Permissions.USER_MANAGE),
         )
-        load()
-    }
-
-    fun load() = viewModelScope.launch {
-        _state.value = _state.value.copy(isLoading = true)
 
         val teams = repository.teams()
         val members = repository.members()

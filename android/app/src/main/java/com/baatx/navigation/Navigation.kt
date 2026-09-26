@@ -32,6 +32,7 @@ import com.baatx.features.customers.CustomerDetailScreen
 import com.baatx.features.customers.CustomersScreen
 import com.baatx.features.followups.FollowUpsScreen
 import com.baatx.features.home.HomeScreen
+import com.baatx.features.org.CreateOrganizationScreen
 import com.baatx.features.org.TeamManagementScreen
 import com.baatx.features.reports.ReportsScreen
 import com.baatx.features.settings.SettingsScreen
@@ -51,6 +52,7 @@ object Routes {
     const val ASSISTANT = "assistant"
     const val CALL_SYNC = "call-sync/{callId}"
     const val TEAMS = "teams"
+    const val CREATE_ORGANIZATION = "create-organization"
 
     fun customerDetail(id: String) = "customers/$id"
     fun review(jobId: String) = "review/$jobId"
@@ -181,11 +183,27 @@ private fun SignedInScaffold(
                     SettingsScreen(
                         onOpenAssistant = { navController.navigate(Routes.ASSISTANT) },
                         onOpenTeams = { navController.navigate(Routes.TEAMS) },
+                        onCreateOrganization = {
+                            navController.navigate(Routes.CREATE_ORGANIZATION)
+                        },
                     )
                 }
 
                 composable(Routes.TEAMS) {
                     TeamManagementScreen(onBack = { navController.popBackStack() })
+                }
+
+                composable(Routes.CREATE_ORGANIZATION) {
+                    CreateOrganizationScreen(
+                        onBack = { navController.popBackStack() },
+                        onCreated = {
+                            // A brand-new organization has no customers or teams
+                            // yet, so land on Home rather than back on Settings.
+                            navController.navigate(Routes.HOME) {
+                                popUpTo(Routes.HOME) { inclusive = true }
+                            }
+                        },
+                    )
                 }
 
                 composable(Routes.ASSISTANT) {
