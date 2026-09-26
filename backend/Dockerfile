@@ -22,8 +22,16 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000
 
+# ffmpeg (and ffprobe, bundled with it) are required by
+# app/services/ai/stt_providers.py to normalise call recordings before
+# sending them to Whisper. Several manufacturers' call-recorder apps save
+# audio in a container that looks natively supported (e.g. audio/mp4) while
+# the actual codec inside (commonly AMR-NB) is not - without ffmpeg/ffprobe
+# available, every such recording fails STT with a hard-to-diagnose 400 or,
+# once probing was added, a ProviderUnavailableError raised specifically
+# because these binaries were missing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 curl ca-certificates \
+        libpq5 curl ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 baatx
 
