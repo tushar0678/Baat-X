@@ -142,6 +142,12 @@ data class ApplyExtractionResponse(
 )
 
 // ---------------- CRM ----------------
+// Matches backend CustomerResponse field-for-field. budget_min/budget_max are
+// read as a raw JsonElement (not Double directly) because Pydantic Decimal
+// fields can serialize as either a JSON number or a JSON string depending on
+// the server's encoder config - a fixed Double type would crash parsing on
+// whichever shape it didn't expect. jsonElementToDoubleOrNull() below handles
+// both shapes and returns null instead of crashing on anything unexpected.
 @Serializable
 data class CustomerDto(
     val id: String,
@@ -181,19 +187,23 @@ data class CustomerDto(
     @SerialName("last_interaction_at") val lastInteractionAt: String? = null,
     @SerialName("next_follow_up_at") val nextFollowUpAt: String? = null,
 ) {
-    /**
-     * Pydantic's ``Decimal`` fields can serialize as a JSON number OR a JSON
-     * string depending on the active encoder config - reading them as a raw
-     * [JsonElement] and converting here means neither case ever fails
-     * deserialization; a malformed/unexpected value just becomes `null`
-     * instead of crashing the whole customer list.
-     */
     val budgetMin: Double?
-        get() = budgetMinRaw?.let { runCatching { it.toString().trim('"').toDouble() }.getOrNull() }
+        get() = jsonElementToDoubleOrNull(budgetMinRaw)
 
     val budgetMax: Double?
-        get() = budgetMaxRaw?.let { runCatching { it.toString().trim('"').toDouble() }.getOrNull() }
-}​‌
+        get() = jsonElementToDoubleOrNull(budgetMaxRaw)
+}
+
+private fun jsonElementToDoubleOrNull(element: JsonElement?): Double? {
+    if (element == null) return null
+    val raw = element.toString()
+    val unquoted = if (raw.length >= 2 && raw.startsWith("\"") && raw.endsWith("\"")) {
+        raw.substring(1, raw.length - 1)
+    } else {
+        raw
+    }
+    return unquoted.toDoubleOrNull()
+}
 
 @Serializable
 data class PageDto<T>(
