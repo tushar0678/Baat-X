@@ -98,8 +98,8 @@ async def signup(db: DbDep, payload: SignupRequest) -> TokenResponse:
         vertical=payload.vertical,
         timezone=payload.timezone,
         default_currency=payload.currency.upper(),
-        is_active=True,
-        whatsapp_enabled=False,
+        # is_active=True,
+        # whatsapp_enabled=False,
     )
     db.add_all([user, business])
     await db.flush()
