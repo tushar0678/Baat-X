@@ -1,5 +1,7 @@
 package com.baatx.features.callsync
 
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.baatx.core.calls.CallSyncNotifier
@@ -7,12 +9,18 @@ import com.baatx.core.network.ApiResult
 import com.baatx.data.local.PendingCallDao
 import com.baatx.data.local.PendingCallEntity
 import com.baatx.domain.repository.ConversationRepository
+import com.baatx.features.audio.AudioPicking
+import com.baatx.features.audio.DeviceRecording
+import com.baatx.features.audio.MediaRecordingsReader
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class CallSyncUiState(
     val isLoading: Boolean = true,
@@ -28,6 +36,11 @@ data class CallSyncUiState(
     val startedJobId: String? = null,
     val finished: Boolean = false,
     val error: String? = null,
+    // --- device recordings picker (MediaStore) ---
+    val deviceRecordings: List<DeviceRecording> = emptyList(),
+    val isLoadingRecordings: Boolean = false,
+    val hasMediaPermission: Boolean = false,
+    val mediaPermissionRequired: String? = null,
 ) {
     /**
      * Nothing is uploaded until there is a recording, a number to attach it to,
@@ -42,18 +55,26 @@ data class CallSyncUiState(
 
 @HiltViewModel
 class CallSyncViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
     private val pendingCallDao: PendingCallDao,
     private val conversations: ConversationRepository,
     private val notifier: CallSyncNotifier,
+    private val mediaRecordingsReader: MediaRecordingsReader,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(CallSyncUiState())
     val state: StateFlow<CallSyncUiState> = _state.asStateFlow()
 
+    init {
+        _state.value = _state.value.copy(
+            mediaPermissionRequired = mediaRecordingsReader.requiredPermission,
+        )
+    }
+
     fun load(callId: String) = viewModelScope.launch {
         notifier.dismiss(callId)
         val call = pendingCallDao.byId(callId)
-        _state.value = CallSyncUiState(
+        _state.value = _state.value.copy(
             isLoading = false,
             call = call,
             phoneNumber = call?.phoneNumber.orEmpty(),
@@ -65,6 +86,78 @@ class CallSyncViewModel @Inject constructor(
                 null
             },
         )
+        refreshRecordingsIfPermitted()
+    }
+
+    /** Call after the permission-request launcher returns, regardless of the result. */
+    fun onMediaPermissionResult(granted: Boolean) {
+        _state.value = _state.value.copy(hasMediaPermission = granted)
+        if (granted) loadDeviceRecordings()
+    }
+
+    private fun refreshRecordingsIfPermitted() {
+        val granted = mediaRecordingsReader.hasPermission()
+        _state.value = _state.value.copy(hasMediaPermission = granted)
+        if (granted) loadDeviceRecordings()
+    }
+
+    /**
+     * Populates the in-app "Recent recordings" list via MediaStore.
+     *
+     * This exists alongside (not instead of) the system document picker
+     * because Samsung's Call Recorder saves to Recordings/Call/, a folder
+     * One UI's document picker does not expose at all. MediaStore has no
+     * such restriction, since Samsung's own media scanner indexes that
+     * folder normally.
+     */
+    fun loadDeviceRecordings() = viewModelScope.launch {
+        _state.value = _state.value.copy(isLoadingRecordings = true)
+        val recordings = withContext(Dispatchers.IO) {
+            mediaRecordingsReader.recentRecordings()
+        }
+        _state.value = _state.value.copy(
+            isLoadingRecordings = false,
+            deviceRecordings = recordings,
+        )
+    }
+
+    /** User tapped one of the in-app recent-recordings entries. */
+    fun onDeviceRecordingSelected(recording: DeviceRecording) = viewModelScope.launch {
+        val copied = withContext(Dispatchers.IO) {
+            AudioPicking.copyToPrivateStorage(appContext, recording.uri, recording.displayName)
+        }
+        if (copied == null) {
+            onPickFailed()
+            return@launch
+        }
+        val mimeType = withContext(Dispatchers.IO) {
+            AudioPicking.mimeTypeOf(appContext, recording.uri)
+        }
+        onRecordingPicked(
+            path = copied.absolutePath,
+            mimeType = mimeType,
+            displayName = recording.displayName,
+        )
+    }
+
+    /** Result callback from the system document picker (the SAF fallback path). */
+    fun onDocumentPicked(context: Context, uri: Uri?) {
+        if (uri == null) return
+        val name = AudioPicking.displayName(context, uri)
+        if (!com.baatx.features.audio.SupportedAudio.isSupported(name)) {
+            onPickFailed()
+            return
+        }
+        val copied = AudioPicking.copyToPrivateStorage(context, uri, name ?: "call.m4a")
+        if (copied == null) {
+            onPickFailed()
+        } else {
+            onRecordingPicked(
+                path = copied.absolutePath,
+                mimeType = AudioPicking.mimeTypeOf(context, uri),
+                displayName = name,
+            )
+        }
     }
 
     fun onPhoneChange(value: String) {
