@@ -9,7 +9,7 @@ from app.auth.deps import CurrentUser, DbDep, requires
 from app.auth.rbac import VisibilityScope
 from app.schemas.report import DailyReportResponse, DashboardResponse, PeriodReportResponse
 from app.services.ai.factory import llm_provider
-from app.services.reports.report_service import ReportService
+
 
 router = APIRouter(tags=["Reports"])
 
