@@ -29,25 +29,76 @@ FRIENDLY_HTTP: dict[int, str] = {
 }
 
 
-def _respond(request: Request, status_code: int, code: str, message: str, details=None):  # noqa: ANN001, ANN202
+def _respond(
+    request: Request,
+    status_code: int,
+    code: str,
+    message: str,
+    details=None,
+):
     payload = ErrorResponse(
         code=code,
         message=message,
         details=details,
         request_id=getattr(request.state, "request_id", None),
     )
-    return JSONResponse(status_code=status_code, content=payload.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=status_code,
+        content=payload.model_dump(mode="json"),
+    )
+
+
+def _safe_db_error_fields(exc: SQLAlchemyError) -> dict[str, str | None]:
+    """Extract PostgreSQL diagnostics without logging SQL or parameter values."""
+    original = getattr(exc, "orig", None)
+    candidates = (
+        original,
+        getattr(original, "__cause__", None),
+        getattr(original, "__context__", None),
+    )
+
+    constraint = None
+    sqlstate = None
+    database_error_type = None
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+
+        if database_error_type is None:
+            database_error_type = type(candidate).__name__
+
+        if constraint is None:
+            constraint = getattr(candidate, "constraint_name", None)
+
+        if sqlstate is None:
+            sqlstate = (
+                getattr(candidate, "sqlstate", None)
+                or getattr(candidate, "pgcode", None)
+            )
+
+    return {
+        "database_error_type": database_error_type,
+        "constraint": constraint,
+        "sqlstate": sqlstate,
+    }
 
 
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(BaatXError)
-    async def _baatx(request: Request, exc: BaatXError):  # noqa: ANN202
+    async def _baatx(request: Request, exc: BaatXError):
         if exc.status_code >= 500:
             log.warning("app_error", code=exc.code, status=exc.status_code)
-        return _respond(request, exc.status_code, exc.code, exc.user_message, exc.details or None)
+        return _respond(
+            request,
+            exc.status_code,
+            exc.code,
+            exc.user_message,
+            exc.details or None,
+        )
 
     @app.exception_handler(RequestValidationError)
-    async def _validation(request: Request, exc: RequestValidationError):  # noqa: ANN202
+    async def _validation(request: Request, exc: RequestValidationError):
         fields = sorted({str(e.get("loc", ["body"])[-1]) for e in exc.errors()})
         return _respond(
             request,
@@ -58,18 +109,38 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(StarletteHTTPException)
-    async def _http(request: Request, exc: StarletteHTTPException):  # noqa: ANN202
-        message = FRIENDLY_HTTP.get(exc.status_code, "Something went wrong. Please try again.")
-        return _respond(request, exc.status_code, f"http_{exc.status_code}", message)
+    async def _http(request: Request, exc: StarletteHTTPException):
+        message = FRIENDLY_HTTP.get(
+            exc.status_code,
+            "Something went wrong. Please try again.",
+        )
+        return _respond(
+            request,
+            exc.status_code,
+            f"http_{exc.status_code}",
+            message,
+        )
 
     @app.exception_handler(IntegrityError)
-    async def _integrity(request: Request, exc: IntegrityError):  # noqa: ANN202
-        log.warning("integrity_error")
-        return _respond(request, 409, "conflict", "This action conflicts with existing data.")
+    async def _integrity(request: Request, exc: IntegrityError):
+        log.warning(
+            "integrity_error",
+            **_safe_db_error_fields(exc),
+        )
+        return _respond(
+            request,
+            409,
+            "conflict",
+            "This action conflicts with existing data.",
+        )
 
     @app.exception_handler(SQLAlchemyError)
-    async def _db(request: Request, exc: SQLAlchemyError):  # noqa: ANN202
-        log.error("database_error", error=type(exc).__name__)
+    async def _db(request: Request, exc: SQLAlchemyError):
+        log.error(
+            "database_error",
+            error=type(exc).__name__,
+            **_safe_db_error_fields(exc),
+        )
         return _respond(
             request,
             503,
@@ -78,6 +149,11 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def _unhandled(request: Request, exc: Exception):  # noqa: ANN202
+    async def _unhandled(request: Request, exc: Exception):
         log.exception("unhandled_error", error=type(exc).__name__)
-        return _respond(request, 500, "internal_error", "Something went wrong. Please try again.")
+        return _respond(
+            request,
+            500,
+            "internal_error",
+            "Something went wrong. Please try again.",
+        )

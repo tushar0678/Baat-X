@@ -104,7 +104,14 @@ async def signup(db: DbDep, payload: SignupRequest) -> TokenResponse:
     db.add_all(
         [
             BusinessMembership(user_id=user.id, business_id=business.id, role=Role.OWNER),
-            Subscription(business_id=business.id, plan=SubscriptionPlan.FREE),
+            Subscription(
+                    business_id=business.id,
+                    plan=SubscriptionPlan.FREE,
+                    is_active=True,
+                    seats=1,
+                    monthly_minutes_quota=300,
+                    monthly_ai_requests_quota=100,
+                ),
         ]
     )
     await db.flush()
