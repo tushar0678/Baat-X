@@ -39,6 +39,17 @@ _FENCE = re.compile(r"^\s*```(?:json)?|```\s*$", re.MULTILINE)
 _LAKH = re.compile(r"(\d+(?:\.\d+)?)\s*(lakh|lac|lakhs)", re.IGNORECASE)
 _CRORE = re.compile(r"(\d+(?:\.\d+)?)\s*(crore|cr)\b", re.IGNORECASE)
 
+# Fields the schema expects as numbers or lists - everything else in the
+# extraction is a string. The model occasionally returns a bare number for a
+# string field (e.g. "quantity": 400 instead of "400", or "budget": 70000
+# instead of "70 lakh"); coercing those to str here - rather than trusting the
+# model's type - means one wrong type from the LLM fails a single field
+# gracefully instead of crashing Pydantic validation for the whole job.
+_NUMERIC_FIELDS = frozenset({"budget_min", "budget_max", "lead_score"})
+_LIST_FIELDS = frozenset(
+    {"pain_points", "objections", "competitors", "query_categories", "important_points"}
+)
+
 
 def sanitize_transcript(text: str, max_chars: int = 200_000) -> str:
     """Strip control chars and neutralise attempts to close our fences."""
@@ -106,17 +117,36 @@ def _loads(content: str) -> dict[str, Any]:
     return parsed
 
 
-def _coerce_field(raw: Any) -> dict[str, Any]:
+def _coerce_scalar(value: Any, field_name: str | None) -> Any:
+    """Bring a raw model-provided value in line with what its field expects.
+
+    Only touches scalar string fields: numeric fields (budget_min/budget_max/
+    lead_score) and list fields keep their native type so downstream numeric
+    logic (parse_money, clamping, union-of-lists) keeps working unchanged.
+    """
+    if field_name in _NUMERIC_FIELDS or field_name in _LIST_FIELDS:
+        return value
+    if isinstance(value, bool):
+        # bool is a subclass of int in Python - explicitly exclude it so a
+        # stray true/false is not silently turned into "True"/"False".
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    return value
+
+
+def _coerce_field(raw: Any, field_name: str | None = None) -> dict[str, Any]:
     """Accept both `{"value":..}` envelopes and bare scalars from the model."""
     if isinstance(raw, dict) and ("value" in raw or "confidence" in raw):
         return {
-            "value": raw.get("value"),
+            "value": _coerce_scalar(raw.get("value"), field_name),
             "confidence": raw.get("confidence", 0.0),
             "source_text": raw.get("source_text"),
         }
+    value = _coerce_scalar(raw, field_name)
     return {
-        "value": raw,
-        "confidence": 0.5 if raw not in (None, "", []) else 0.0,
+        "value": value,
+        "confidence": 0.5 if value not in (None, "", []) else 0.0,
         "source_text": None,
     }
 
@@ -127,7 +157,7 @@ def normalize_raw_extraction(raw: dict[str, Any]) -> dict[str, Any]:
         if key in {"summary", "language_detected", "follow_up"}:
             out[key] = value
         else:
-            out[key] = _coerce_field(value)
+            out[key] = _coerce_field(value, key)
     return out
 
 
@@ -158,6 +188,7 @@ class ExtractionService:
             self._settings.transcript_chunk_chars,
             self._settings.transcript_chunk_overlap_chars,
         )
+
         partials: list[dict[str, Any]] = []
         context: str | None = None
         for index, chunk in enumerate(chunks):
@@ -184,6 +215,7 @@ class ExtractionService:
         return payload
 
     # ---------------- internals ----------------
+
     async def _merge(self, partials: list[dict[str, Any]]) -> dict[str, Any]:
         """Deterministic merge first; the LLM only rewrites the summary."""
         merged: dict[str, Any] = {}
@@ -220,7 +252,6 @@ class ExtractionService:
                     new_val not in (None, "", [])
                 ):
                     merged[key] = value
-
         if len(summaries) == 1:
             merged["summary"] = summaries[0]
         elif summaries:
@@ -271,6 +302,7 @@ class ExtractionService:
         else:
             payload.budget_min.value = parse_money(payload.budget_min.value)
             payload.budget_max.value = parse_money(payload.budget_max.value)
+
         if (
             payload.budget_min.value is not None
             and payload.budget_max.value is not None
@@ -280,6 +312,7 @@ class ExtractionService:
                 payload.budget_max.value,
                 payload.budget_min.value,
             )
+
         if not payload.currency.value:
             payload.currency = Field_(value=currency, confidence=0.5)
 
@@ -295,8 +328,10 @@ class ExtractionService:
 
         if payload.lead_score.value is not None:
             payload.lead_score.value = max(0, min(100, int(payload.lead_score.value)))
+
         if payload.summary:
             payload.summary = sanitize_transcript(payload.summary, 2000)
+
         return payload
 
     def _resolve_follow_up(
