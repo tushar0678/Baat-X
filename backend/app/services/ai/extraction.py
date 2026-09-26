@@ -50,6 +50,11 @@ _LIST_FIELDS = frozenset(
     {"pain_points", "objections", "competitors", "query_categories", "important_points"}
 )
 
+# Valid values for FollowUpExtraction.type - anything else (including a typo'd
+# or hallucinated category) falls back to GENERAL_FOLLOW_UP rather than
+# failing extraction for the whole job over one enum field.
+_VALID_FOLLOW_UP_TYPES = {member.value for member in FollowUpType}
+
 
 def sanitize_transcript(text: str, max_chars: int = 200_000) -> str:
     """Strip control chars and neutralise attempts to close our fences."""
@@ -151,10 +156,43 @@ def _coerce_field(raw: Any, field_name: str | None = None) -> dict[str, Any]:
     }
 
 
+def _sanitize_follow_up(raw: Any) -> dict[str, Any]:
+    """Makes the model's follow_up object safe to validate against FollowUpExtraction.
+
+    The most important thing this does: if the model returns the ``type`` key
+    with an explicit ``null`` (or omits it, or sends a value that isn't one of
+    the known FollowUpType values), we replace it with the schema's own
+    default (GENERAL_FOLLOW_UP) *here*, in plain Python, before Pydantic ever
+    sees it.
+
+    That's necessary because FollowUpExtraction.type already declares a
+    default of GENERAL_FOLLOW_UP - but Pydantic only applies a field default
+    when the key is *absent* from the input. When the model includes
+    ``"type": null`` explicitly (which it does whenever it decides no
+    follow-up is needed, since that's a natural way for an LLM asked for a
+    "type" field to express "none"), Pydantic honours the explicit null over
+    the schema default and validation fails with exactly the enum error seen
+    in production: `Input should be 'call_customer', ... [input_value=None]`.
+    Every other field in this payload is wrapped in `Field_` (which is
+    `T | None`, so null is always valid there); `follow_up.type` is the one
+    plain, non-optional enum field in the whole schema, which is why this
+    surfaced only here.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = dict(raw)
+    raw_type = out.get("type")
+    if not raw_type or str(raw_type) not in _VALID_FOLLOW_UP_TYPES:
+        out["type"] = FollowUpType.GENERAL_FOLLOW_UP.value
+    return out
+
+
 def normalize_raw_extraction(raw: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in raw.items():
-        if key in {"summary", "language_detected", "follow_up"}:
+        if key == "follow_up":
+            out[key] = _sanitize_follow_up(value)
+        elif key in {"summary", "language_detected"}:
             out[key] = value
         else:
             out[key] = _coerce_field(value, key)
@@ -263,6 +301,10 @@ class ExtractionService:
                 merged["summary"] = _loads(result.content).get("summary") or " ".join(summaries)
             except AIProcessingError:
                 merged["summary"] = " ".join(summaries)[:1500]
+        # The merge above is a plain dict copy for follow_up - re-sanitize in
+        # case the chosen partial's follow_up still needs cleaning up.
+        if "follow_up" in merged:
+            merged["follow_up"] = _sanitize_follow_up(merged["follow_up"])
         return merged
 
     def _context_digest(self, parsed: dict[str, Any]) -> str:
