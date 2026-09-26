@@ -44,12 +44,21 @@ async def list_customers(
 ) -> Page[CustomerResponse]:
     """Search runs inside the caller's scope.
 
-    ``filters.owner_user_id`` narrows the result but cannot widen it - asking
-    for a colleague's id returns an empty page rather than their customers.
+    ``CustomerService.list_customers`` only supports narrowing to a single
+    owner (``restrict_to_user_id``), not an arbitrary set - so a manager
+    (``VisibilityScope.ORG``) passes ``None`` and sees everyone, while anyone
+    else is restricted to their own records. Team-wide visibility for a team
+    lead isn't implemented at the repository layer yet; until it is, a team
+    lead is scoped to their own records too, which under-shares rather than
+    leaking a teammate's book.
+
+    ``filters.owner_user_id`` narrows the result further but cannot widen it -
+    asking for a colleague's id while restricted still returns an empty page.
     """
     scope = scope_filter(principal.role, principal.user_id)
+    restrict_to = None if scope.unrestricted else principal.user_id
     return await _service(db, principal).list_customers(
-        filters, params, restrict_to_user_ids=scope.user_ids
+        filters, params, restrict_to_user_id=restrict_to
     )
 
 

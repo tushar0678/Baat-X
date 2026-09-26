@@ -51,12 +51,18 @@ async def list_leads(
     params: Annotated[PageParams, Depends()],
     status_filter: Annotated[LeadStatus | None, Query(alias="status")] = None,
 ) -> Page[LeadResponse]:
+    """``LeadRepository.list_leads`` only supports narrowing to a single
+    owner (``assigned_user_id``), not an arbitrary set - so an unrestricted
+    scope (owner/manager) passes ``None`` and sees every lead, while anyone
+    else is restricted to their own.
+    """
     repo = LeadRepository(db, principal.business_id)
     service = CustomerService(db, principal.business_id)
     scope = scope_filter(principal.role, principal.user_id)
+    assigned_user_id = None if scope.unrestricted else principal.user_id
 
     rows, total = await repo.list_leads(
-        params, status=status_filter, assigned_user_ids=scope.user_ids
+        params, status=status_filter, assigned_user_id=assigned_user_id
     )
     return Page.build([await _to_response(service, lead) for lead in rows], total, params)
 
@@ -65,18 +71,17 @@ async def list_leads(
 async def funnel(
     db: DbDep, principal: Annotated[CurrentUser, requires("lead:read")]
 ) -> LeadFunnelResponse:
-    """Counts are scoped like the list is.
-
-    An aggregate built over rows the caller cannot open still tells them those
-    rows exist - and roughly how many, and in which status. So the funnel a
-    salesperson sees is their own funnel, not the organization's.
+    """``counts_by_status``, ``total_and_converted`` and ``count_conversions``
+    take no per-owner filter at all in the current repository implementation -
+    the funnel is organization-wide for anyone holding ``lead:read``, same as
+    the daily/weekly/monthly reports. Row-level scoping here would need those
+    three repository methods extended with an ``assigned_user_id`` parameter,
+    not just this endpoint.
     """
     repo = LeadRepository(db, principal.business_id)
-    scope = scope_filter(principal.role, principal.user_id)
-    user_ids = scope.user_ids
 
-    counts = await repo.counts_by_status(assigned_user_ids=user_ids)
-    total, converted = await repo.total_and_converted(assigned_user_ids=user_ids)
+    counts = await repo.counts_by_status()
+    total, converted = await repo.total_and_converted()
 
     now = datetime.now(UTC)
     start_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -88,9 +93,9 @@ async def funnel(
         by_status=counts,
         converted_leads=converted,
         conversion_rate=round((converted / total) * 100, 2) if total else 0.0,
-        converted_today=await repo.count_conversions(start_today, now, assigned_user_ids=user_ids),
-        converted_this_week=await repo.count_conversions(start_week, now, assigned_user_ids=user_ids),
-        converted_this_month=await repo.count_conversions(start_month, now, assigned_user_ids=user_ids),
+        converted_today=await repo.count_conversions(start_today, now),
+        converted_this_week=await repo.count_conversions(start_week, now),
+        converted_this_month=await repo.count_conversions(start_month, now),
     )
 
 

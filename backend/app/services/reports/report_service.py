@@ -1,6 +1,6 @@
 """Reports and dashboard.
 
-Every number here is a COUNT/SUM over real rows (§43). The only generated text
+Every number here is a COUNT/SUM over real rows. The only generated text
 is `ai_insights`, which is computed from those same numbers and is always
 labelled `insights_are_ai_generated = true`.
 """
@@ -84,6 +84,7 @@ class ReportService:
         self.reports = ReportRepository(session, business_id)
 
     # ---------------- windows ----------------
+
     def day_window(self, day: date) -> Window:
         start = datetime.combine(day, time.min, tzinfo=self.tz)
         return Window.of(start, start + timedelta(days=1), day, day)
@@ -103,6 +104,7 @@ class ReportService:
         return Window.of(start, end, start_date, end_date - timedelta(days=1))
 
     # ---------------- primitives ----------------
+
     async def _count(self, stmt) -> int:  # noqa: ANN001
         return int((await self.session.execute(stmt)).scalar_one())
 
@@ -176,11 +178,11 @@ class ReportService:
         ]
 
     # ---------------- dashboard ----------------
+
     async def dashboard(self, *, user_id: uuid.UUID | None, restrict: bool) -> DashboardResponse:
         now = datetime.now(self.tz)
         w = self.day_window(now.date())
         assignee = user_id if restrict else None
-
         today_follow_ups = len(
             await self.follow_ups.list_between(w.start, w.end, assigned_user_id=assignee)
         )
@@ -191,7 +193,6 @@ class ReportService:
             .where(Lead.business_id == self.business_id)
             .where(Lead.status == LeadStatus.HOT)
         )
-
         return DashboardResponse(
             greeting=_greeting(now),
             today=DashboardToday(
@@ -210,7 +211,6 @@ class ReportService:
 
     async def _ai_activity(self, limit: int = 5) -> list[AIActivityItem]:
         items: list[AIActivityItem] = []
-
         stmt = (
             select(FollowUp, Customer.name)
             .join(Customer, Customer.id == FollowUp.customer_id)
@@ -252,6 +252,7 @@ class ReportService:
         return items[:limit]
 
     # ---------------- daily ----------------
+
     async def daily(
         self, day: date | None = None, *, with_insights: bool = True
     ) -> DailyReportResponse:
@@ -271,12 +272,15 @@ class ReportService:
             queries=await self._query_metrics(w),
             important_follow_ups=await self._important_follow_ups(now),
         )
+
         if with_insights:
             report.ai_insights = await self._insights(report.model_dump(mode="json"))
+
         await self._persist(report, "daily", w)
         return report
 
     # ---------------- weekly / monthly ----------------
+
     async def period(
         self, period: str, anchor: date | None = None, *, with_insights: bool = True
     ) -> PeriodReportResponse:
@@ -312,8 +316,10 @@ class ReportService:
             pending_opportunities=await self._pending_opportunities(),
             important_follow_ups=await self._important_follow_ups(now, limit=8),
         )
+
         if with_insights:
             report.ai_insights = await self._insights(report.model_dump(mode="json"))
+
         await self._persist(report, period, w)
         return report
 
@@ -381,6 +387,7 @@ class ReportService:
         ]
 
     # ---------------- insights ----------------
+
     async def _insights(self, metrics: dict) -> list[str]:
         """LLM phrasing over real numbers; deterministic fallback if AI is unavailable."""
         fallback = _fallback_insights(metrics)
@@ -414,6 +421,7 @@ class ReportService:
                 await self.reports.record_metric(w.start_date, key, float(metrics.get(key, 0)))
 
     # ---------------- housekeeping ----------------
+
     async def stale_jobs(self, older_than_minutes: int = 90) -> list[AIProcessingJob]:
         cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
         stmt = (
@@ -456,9 +464,9 @@ def _fallback_insights(metrics: dict) -> list[str]:
     follow_ups = metrics.get("follow_ups") or {}
     queries = metrics.get("queries") or {}
     leads = metrics.get("leads") or {}
-
     interested = metrics.get("interested_leads", leads.get("interested", 0))
     converted = metrics.get("converted_customers", leads.get("converted", 0))
+
     if interested:
         out.append(f"{interested} customers showed interest in this period.")
     if queries.get("price_concerns"):
@@ -471,4 +479,5 @@ def _fallback_insights(metrics: dict) -> list[str]:
         out.append(f"{follow_ups['overdue']} follow-ups are overdue.")
     if leads.get("conversion_rate"):
         out.append(f"Conversion rate for this period is {leads['conversion_rate']}%.")
+
     return out or ["No activity recorded for this period yet."]

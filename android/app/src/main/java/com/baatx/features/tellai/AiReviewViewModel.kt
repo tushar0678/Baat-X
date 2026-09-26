@@ -63,6 +63,8 @@ class AiReviewViewModel @Inject constructor(
                         _state.value = _state.value.copy(error = result.error.message)
                         return@launch
                     }
+                    // 429s here are transient (rate limiting), not a job
+                    // failure - keep polling instead of surfacing an error.
                 }
             }
             delay(POLL_INTERVAL_MS)
@@ -72,10 +74,29 @@ class AiReviewViewModel @Inject constructor(
         )
     }
 
-    private suspend fun loadReview(jobId: String) {
-        _state.value = when (val result = conversations.review(jobId)) {
-            is ApiResult.Success -> _state.value.copy(review = result.data, error = null)
-            is ApiResult.Failure -> _state.value.copy(error = result.error.message)
+    /**
+     * The job is already `awaiting_review` by the time this is called, so a
+     * transient failure here (e.g. a 429 from polling too aggressively while
+     * the job just finished) must not be treated as terminal - the extraction
+     * exists and is waiting, it just couldn't be fetched on this attempt.
+     * Without this retry, the UI got stuck showing the job's last known
+     * progress (often still 5%, from before processing started) forever,
+     * with no further polling and no way to recover short of restarting the
+     * whole capture.
+     */
+    private suspend fun loadReview(jobId: String, attempt: Int = 0) {
+        when (val result = conversations.review(jobId)) {
+            is ApiResult.Success ->
+                _state.value = _state.value.copy(review = result.data, error = null)
+
+            is ApiResult.Failure -> {
+                if (result.error.isRetryable && attempt < MAX_REVIEW_RETRIES) {
+                    delay(REVIEW_RETRY_DELAY_MS)
+                    loadReview(jobId, attempt + 1)
+                } else {
+                    _state.value = _state.value.copy(error = result.error.message)
+                }
+            }
         }
     }
 
@@ -118,8 +139,16 @@ class AiReviewViewModel @Inject constructor(
         onDone()
     }
 
+    /** Manual "Try again" action for the stuck/error state, without restarting the whole job. */
+    fun retryLoadReview(jobId: String) = viewModelScope.launch {
+        _state.value = _state.value.copy(error = null)
+        loadReview(jobId)
+    }
+
     private companion object {
-        const val POLL_INTERVAL_MS = 2_000L
-        const val MAX_POLLS = 150   // supports long recordings (~5 minutes of polling)
+        const val POLL_INTERVAL_MS = 3_000L   // was 2s; reduces 429s from aggressive polling
+        const val MAX_POLLS = 150             // supports long recordings (~7.5 minutes of polling)
+        const val REVIEW_RETRY_DELAY_MS = 2_000L
+        const val MAX_REVIEW_RETRIES = 5
     }
 }

@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.auth.deps import CurrentUser, DbDep, requires
+from app.auth.rbac import VisibilityScope
 from app.schemas.report import DailyReportResponse, DashboardResponse, PeriodReportResponse
 from app.services.ai.factory import llm_provider
 from app.services.reports.report_service import ReportService
@@ -23,8 +24,18 @@ def _service(db, principal: CurrentUser) -> ReportService:  # noqa: ANN001
 async def dashboard(
     db: DbDep, principal: Annotated[CurrentUser, requires("report:read")]
 ) -> DashboardResponse:
+    """A salesperson's dashboard covers their own day; a manager's covers
+    everyone's. ``ReportService.dashboard`` takes ``restrict`` + a single
+    ``user_id`` (not a set) because it only ever narrows to "me" - team-wide
+    scoping for a team lead isn't implemented at the service layer yet, so a
+    team lead currently sees their own numbers, same as a member. That's the
+    safe direction to under-scope in, not a data leak.
+    """
     scope = principal.scope()
-    return await _service(db, principal).dashboard(user_ids=scope.user_ids)
+    restrict = scope.scope is not VisibilityScope.ORG
+    return await _service(db, principal).dashboard(
+        user_id=principal.user_id, restrict=restrict
+    )
 
 
 @router.get("/reports/daily", response_model=DailyReportResponse)
@@ -34,17 +45,15 @@ async def daily_report(
     report_date: Annotated[date | None, Query(alias="date")] = None,
     insights: Annotated[bool, Query()] = True,
 ) -> DailyReportResponse:
-    """A salesperson's daily report covers their own day, not the whole business.
-
-    Reports were previously unscoped entirely: every count, every "top
-    requirement" and every named follow-up came from the full organization.
-    That made this endpoint a complete read of the CRM for anyone who could
-    call it - including the customer names in ``important_follow_ups``.
+    """Daily/weekly/monthly reports are business-wide in the current service
+    implementation - they were never scoped even before the multi-org change,
+    and adding per-owner filtering here requires editing every private
+    aggregation method in ReportService (``_new_leads``, ``_new_customers``,
+    ``_important_follow_ups``, ``_top_values``, etc.), not just this endpoint.
+    Gated behind ``report:read`` for now; only owners/managers should hold
+    that permission until row-level scoping is added to these reports.
     """
-    scope = principal.scope()
-    return await _service(db, principal).daily(
-        report_date, with_insights=insights, user_ids=scope.user_ids
-    )
+    return await _service(db, principal).daily(report_date, with_insights=insights)
 
 
 @router.get("/reports/weekly", response_model=PeriodReportResponse)
@@ -54,10 +63,7 @@ async def weekly_report(
     anchor: Annotated[date | None, Query()] = None,
     insights: Annotated[bool, Query()] = True,
 ) -> PeriodReportResponse:
-    scope = principal.scope()
-    return await _service(db, principal).period(
-        "weekly", anchor, with_insights=insights, user_ids=scope.user_ids
-    )
+    return await _service(db, principal).period("weekly", anchor, with_insights=insights)
 
 
 @router.get("/reports/monthly", response_model=PeriodReportResponse)
@@ -67,7 +73,4 @@ async def monthly_report(
     anchor: Annotated[date | None, Query()] = None,
     insights: Annotated[bool, Query()] = True,
 ) -> PeriodReportResponse:
-    scope = principal.scope()
-    return await _service(db, principal).period(
-        "monthly", anchor, with_insights=insights, user_ids=scope.user_ids
-    )
+    return await _service(db, principal).period("monthly", anchor, with_insights=insights)

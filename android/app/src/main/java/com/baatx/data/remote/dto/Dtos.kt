@@ -142,28 +142,68 @@ data class ApplyExtractionResponse(
 )
 
 // ---------------- CRM ----------------
+// Matches backend CustomerResponse field-for-field. budget_min/budget_max are
+// read as a raw JsonElement (not Double directly) because Pydantic Decimal
+// fields can serialize as either a JSON number or a JSON string depending on
+// the server's encoder config - a fixed Double type would crash parsing on
+// whichever shape it didn't expect. jsonElementToDoubleOrNull() below handles
+// both shapes and returns null instead of crashing on anything unexpected.
 @Serializable
 data class CustomerDto(
     val id: String,
+    @SerialName("business_id") val businessId: String? = null,
     val name: String? = null,
+    val phone: String? = null,
+    @SerialName("normalized_phone") val normalizedPhone: String? = null,
     @SerialName("phone_masked") val phoneMasked: String? = null,
     val email: String? = null,
     val company: String? = null,
     val location: String? = null,
     val requirement: String? = null,
     val product: String? = null,
-    @SerialName("budget_min") val budgetMin: Double? = null,
-    @SerialName("budget_max") val budgetMax: Double? = null,
+    val service: String? = null,
+    val quantity: String? = null,
+    @SerialName("budget_min") val budgetMinRaw: JsonElement? = null,
+    @SerialName("budget_max") val budgetMaxRaw: JsonElement? = null,
     val currency: String = "INR",
     val timeline: String? = null,
+    val availability: String? = null,
+    @SerialName("price_discussion") val priceDiscussion: String? = null,
     @SerialName("purchase_intent") val purchaseIntent: String = "unknown",
+    val sentiment: String = "unknown",
+    @SerialName("pain_points") val painPoints: List<String>? = null,
+    val objections: List<String>? = null,
+    val competitors: List<String>? = null,
+    @SerialName("decision_maker") val decisionMaker: String? = null,
+    val query: String? = null,
+    val topic: String? = null,
+    val summary: String? = null,
     @SerialName("lead_status") val leadStatus: String = "new",
     @SerialName("lead_score") val leadScore: Int = 0,
-    val summary: String? = null,
-    val query: String? = null,
+    val source: String = "manual",
+    @SerialName("owner_user_id") val ownerUserId: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("updated_at") val updatedAt: String? = null,
     @SerialName("last_interaction_at") val lastInteractionAt: String? = null,
     @SerialName("next_follow_up_at") val nextFollowUpAt: String? = null,
-)
+) {
+    val budgetMin: Double?
+        get() = jsonElementToDoubleOrNull(budgetMinRaw)
+
+    val budgetMax: Double?
+        get() = jsonElementToDoubleOrNull(budgetMaxRaw)
+}
+
+private fun jsonElementToDoubleOrNull(element: JsonElement?): Double? {
+    if (element == null) return null
+    val raw = element.toString()
+    val unquoted = if (raw.length >= 2 && raw.startsWith("\"") && raw.endsWith("\"")) {
+        raw.substring(1, raw.length - 1)
+    } else {
+        raw
+    }
+    return unquoted.toDoubleOrNull()
+}
 
 @Serializable
 data class PageDto<T>(

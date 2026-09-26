@@ -78,6 +78,15 @@ class Business(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata", nullable=False)
     default_currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
 
+    # Existed in the database (0001_initial) since before this multi-org
+    # model was introduced, but was never mapped here - so the ORM never set
+    # it, and every signup relied silently on the column's database-level
+    # DEFAULT to avoid a NOT NULL violation. Mapping it explicitly means the
+    # ORM is now the source of truth, not a server_default that can be lost
+    # if the schema is ever recreated from the model instead of from
+    # migration history.
+    whatsapp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID(), ForeignKey("users.id", ondelete="SET NULL")
     )
