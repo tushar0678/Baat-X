@@ -60,6 +60,8 @@ def _safe_db_error_fields(exc: SQLAlchemyError) -> dict[str, str | None]:
     constraint = None
     sqlstate = None
     database_error_type = None
+    column_name = None
+    table_name = None
 
     for candidate in candidates:
         if candidate is None:
@@ -77,11 +79,23 @@ def _safe_db_error_fields(exc: SQLAlchemyError) -> dict[str, str | None]:
                 or getattr(candidate, "pgcode", None)
             )
 
+        # asyncpg attaches these for NOT NULL / column-level violations
+        # (sqlstate 23502), where constraint_name is not set.
+        if column_name is None:
+            column_name = getattr(candidate, "column_name", None)
+
+        if table_name is None:
+            table_name = getattr(candidate, "table_name", None)
+
     return {
         "database_error_type": database_error_type,
         "constraint": constraint,
         "sqlstate": sqlstate,
+        "column": column_name,
+        "table": table_name,
     }
+
+
 
 
 def register_exception_handlers(app: FastAPI) -> None:
