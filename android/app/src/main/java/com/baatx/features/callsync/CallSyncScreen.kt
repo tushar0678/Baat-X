@@ -134,7 +134,13 @@ fun CallSyncScreen(
             } else {
                 RecordingPicker(
                     state = state,
-                    onRequestPermission = { mediaPermissionLauncher.launch(state.mediaPermissionRequired) },
+                    onRequestPermission = {
+                        // mediaPermissionRequired is nullable (it's set in the
+                        // ViewModel's init block from MediaRecordingsReader), so
+                        // it must be null-checked before being passed to a
+                        // launcher that requires a non-null String permission.
+                        state.mediaPermissionRequired?.let { mediaPermissionLauncher.launch(it) }
+                    },
                     onSelectDeviceRecording = viewModel::onDeviceRecordingSelected,
                     onOpenDocumentPicker = { recordingPicker.launch(SupportedAudio.MIME_TYPES) },
                 )
@@ -200,13 +206,6 @@ fun CallSyncScreen(
 /**
  * Recent recordings read from MediaStore, plus a fallback to the system
  * document picker.
- *
- * The MediaStore list exists because Samsung's Call Recorder saves to
- * Recordings/Call/, a folder One UI's own document picker does not expose -
- * "Choose a file" alone left Samsung users with an empty picker and no way to
- * attach the recording they clearly had. MediaStore has no such restriction.
- * The document picker stays as a fallback for recordings MediaStore hasn't
- * indexed yet, or for other apps that save call recordings differently.
  */
 @Composable
 private fun RecordingPicker(
