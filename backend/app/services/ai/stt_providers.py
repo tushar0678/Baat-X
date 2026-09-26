@@ -113,39 +113,64 @@ class AzureSpeechProvider:
         return bool(self._key)
 
 
-# Content types a Whisper-compatible /audio/transcriptions endpoint accepts
-# without any conversion, mapped to the filename extension OpenAI expects to
-# see (it partly infers format from the filename, not content_type alone).
-_OPENAI_NATIVE_CONTENT_TYPES: dict[str, str] = {
-    "audio/mpeg": "mp3",
-    "audio/mp3": "mp3",
-    "audio/mp4": "mp4",
-    "audio/x-m4a": "m4a",
-    "audio/m4a": "m4a",
-    "audio/wav": "wav",
-    "audio/x-wav": "wav",
-    "audio/wave": "wav",
-    "audio/webm": "webm",
-    "audio/ogg": "ogg",
-    "audio/flac": "flac",
-    "audio/x-flac": "flac",
-}
-
 _FFMPEG_PATH = shutil.which("ffmpeg")
+_FFPROBE_PATH = shutil.which("ffprobe")
+
+# Audio codecs a Whisper-compatible endpoint decodes without complaint. This is
+# deliberately a codec allowlist, not a container/content-type allowlist: a
+# file can claim "audio/mp4" (a perfectly valid container) while the stream
+# inside it is encoded with something OpenAI's Whisper backend still rejects -
+# this is exactly what several manufacturers' call-recorder apps produce
+# (commonly an AMR-NB voice codec wrapped in an MP4/3GP container labelled
+# as audio/mp4). Trusting the container label alone let that case through
+# untranscoded and produced a 400 from OpenAI with no further recourse.
+_WHISPER_SAFE_CODECS = frozenset({
+    "aac", "mp3", "flac", "pcm_s16le", "pcm_s24le", "pcm_f32le", "vorbis", "opus",
+})
+
+
+def _probe_audio_codec(audio_bytes: bytes) -> str | None:
+    """Returns the audio codec name (e.g. "aac", "amr_nb"), or None if it can't be determined."""
+    if not _FFPROBE_PATH:
+        return None
+
+    with tempfile.NamedTemporaryFile(suffix=".bin") as tmp:
+        tmp.write(audio_bytes)
+        tmp.flush()
+        result = subprocess.run(
+            [
+                _FFPROBE_PATH,
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "json",
+                tmp.name,
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        try:
+            parsed = json.loads(result.stdout or "{}")
+            streams = parsed.get("streams") or []
+            return streams[0].get("codec_name") if streams else None
+        except (json.JSONDecodeError, IndexError, AttributeError):
+            return None
 
 
 def _transcode_to_wav(audio_bytes: bytes) -> bytes:
     """Converts arbitrary audio into 16kHz mono WAV via ffmpeg.
 
-    Exists because a phone's call-recorder app can save its output in a
-    container/codec a Whisper-compatible endpoint flatly rejects - most
-    commonly AMR-NB (a low-bitrate speech codec used for call audio), often
-    even when the filename extension looks like an accepted one (e.g. an
-    ".m4a" file that is actually AMR inside). This is not one device's
-    problem: whichever app or manufacturer produced the recording, if its
-    encoding isn't in the accepted set, the fix is the same - normalise to a
-    format every provider accepts, rather than trying to special-case each
-    unsupported encoder as it's discovered.
+    Exists because a phone's call-recorder app can save its output with a
+    codec a Whisper-compatible endpoint flatly rejects - most commonly
+    AMR-NB (a low-bitrate speech codec used for call audio), regardless of
+    what the surrounding container or content-type claims to be. This is not
+    one device's problem: whichever app or manufacturer produced the
+    recording, if its encoding isn't in the accepted set, the fix is the
+    same - normalise to a format every provider accepts, rather than trying
+    to special-case each unsupported encoder as it's discovered.
 
     Raises ProviderUnavailableError with a user-facing message if ffmpeg is
     unavailable or the input can't be decoded at all (e.g. a genuinely
@@ -194,17 +219,38 @@ def _transcode_to_wav(audio_bytes: bytes) -> bytes:
 def _prepare_for_whisper(audio_bytes: bytes, content_type: str | None) -> tuple[bytes, str, str]:
     """Returns (bytes, content_type, filename_extension) ready to upload.
 
-    Only transcodes when the incoming content type isn't already one Whisper
-    accepts natively - the common case (recordings made by BaatX's own Tell
-    AI recorder, which always produces AAC/M4A) passes through untouched, so
-    this adds no overhead for the majority of uploads.
-    """
-    normalized = (content_type or "").split(";")[0].strip().lower()
-    ext = _OPENAI_NATIVE_CONTENT_TYPES.get(normalized)
-    if ext:
-        return audio_bytes, normalized, ext
+    Probes the actual audio codec (not just the claimed content-type/container)
+    and only transcodes when that codec is one Whisper is known to reject.
+    A file whose container says "audio/mp4" but whose stream is AMR-NB - the
+    common shape of call-recorder output on several manufacturers' phones -
+    is transcoded here even though "audio/mp4" looks like a natively
+    supported content type, because the container label was never a reliable
+    signal for what OpenAI's backend can actually decode.
 
-    log.info("audio_transcoding_to_wav", original_content_type=content_type)
+    If ffprobe isn't available, or the codec can't be determined, this errs
+    on the side of transcoding rather than gambling on a 400 from OpenAI -
+    transcoding a file that was already fine just costs a little CPU time.
+    """
+    codec = _probe_audio_codec(audio_bytes)
+
+    if codec is not None and codec in _WHISPER_SAFE_CODECS:
+        # Known-good codec: skip transcoding, use the original bytes with a
+        # generic-but-accepted extension so OpenAI's filename-based sniffing
+        # doesn't get confused by an unusual original name.
+        ext = {"aac": "m4a", "mp3": "mp3", "flac": "flac", "vorbis": "ogg", "opus": "ogg"}.get(
+            codec, "wav"
+        )
+        native_content_type = {
+            "m4a": "audio/mp4", "mp3": "audio/mpeg", "flac": "audio/flac", "ogg": "audio/ogg",
+            "wav": "audio/wav",
+        }[ext]
+        return audio_bytes, native_content_type, ext
+
+    log.info(
+        "audio_transcoding_to_wav",
+        original_content_type=content_type,
+        detected_codec=codec,
+    )
     wav_bytes = _transcode_to_wav(audio_bytes)
     return wav_bytes, "audio/wav", "wav"
 
@@ -263,9 +309,6 @@ class OpenAICompatibleSTT:
         if response.status_code >= 500:
             raise ProviderUnavailableError(f"STT {response.status_code}")
         if response.status_code == 404:
-            # Almost always a base-URL mismatch (e.g. pointed at a host with no
-            # Whisper-compatible endpoint) - surface that clearly instead of a
-            # bare "404 Not Found" deep in a stack trace.
             log.warning(
                 "stt_endpoint_not_found",
                 base_url=self._base_url,
@@ -276,11 +319,6 @@ class OpenAICompatibleSTT:
                 "Check STT_BASE_URL/STT_API_KEY/STT_MODEL."
             )
         if response.status_code == 400:
-            # Logging the response body (not just the status code) is what
-            # actually distinguishes "unsupported audio format", "file too
-            # large", "empty file" etc. - the previous bare raise_for_status()
-            # only ever surfaced "400 Bad Request" with no indication of why,
-            # which is indistinguishable from any other client error.
             log.warning(
                 "stt_rejected_audio",
                 base_url=self._base_url,
@@ -308,10 +346,10 @@ class OpenAICompatibleSTT:
         if audio_bytes is None:
             raise ProviderUnavailableError("STT requires the audio payload")
 
-        # Transcoding (if needed) runs once on the whole file, before
-        # chunking - splitting an AMR/3GP stream into byte-range parts first
-        # and transcoding each part independently would produce corrupt,
-        # independently-undecodable fragments for most codecs.
+        # Transcoding decision runs once on the whole file, before chunking -
+        # splitting an unsupported codec's stream into byte-range parts first
+        # and probing/transcoding each part independently would produce
+        # corrupt, independently-undecodable fragments for most codecs.
         prepared_bytes, prepared_content_type, extension = await asyncio.to_thread(
             _prepare_for_whisper, audio_bytes, content_type
         )
