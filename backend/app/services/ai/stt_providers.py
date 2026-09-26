@@ -124,9 +124,26 @@ _FFPROBE_PATH = shutil.which("ffprobe")
 # (commonly an AMR-NB voice codec wrapped in an MP4/3GP container labelled
 # as audio/mp4). Trusting the container label alone let that case through
 # untranscoded and produced a 400 from OpenAI with no further recourse.
-_WHISPER_SAFE_CODECS = frozenset({
-    "aac", "mp3", "flac", "pcm_s16le", "pcm_s24le", "pcm_f32le", "vorbis", "opus",
-})
+#
+# Each codec maps to a single (extension, content_type) PAIR that are known to
+# agree with each other for OpenAI's format sniffing. Sending a mismatched
+# pair - e.g. filename "audio.m4a" with Content-Type "audio/mp4" - is enough
+# on its own to make OpenAI reject an otherwise perfectly valid file with
+# "Invalid file format": this was an actual production regression the first
+# version of this mapping introduced, by choosing the extension and
+# content-type from two different, uncoordinated dicts.
+_CODEC_TO_EXTENSION_AND_CONTENT_TYPE: dict[str, tuple[str, str]] = {
+    "aac": ("mp4", "audio/mp4"),
+    "mp3": ("mp3", "audio/mpeg"),
+    "flac": ("flac", "audio/flac"),
+    "vorbis": ("ogg", "audio/ogg"),
+    "opus": ("ogg", "audio/ogg"),
+    "pcm_s16le": ("wav", "audio/wav"),
+    "pcm_s24le": ("wav", "audio/wav"),
+    "pcm_f32le": ("wav", "audio/wav"),
+}
+
+_WHISPER_SAFE_CODECS = frozenset(_CODEC_TO_EXTENSION_AND_CONTENT_TYPE.keys())
 
 
 def _probe_audio_codec(audio_bytes: bytes) -> str | None:
@@ -227,6 +244,12 @@ def _prepare_for_whisper(audio_bytes: bytes, content_type: str | None) -> tuple[
     supported content type, because the container label was never a reliable
     signal for what OpenAI's backend can actually decode.
 
+    When the codec IS one Whisper accepts, the returned extension and
+    content_type always come from the same lookup table entry, so they never
+    disagree with each other - a mismatched pair (e.g. ".m4a" filename with
+    an "audio/mp4" Content-Type) is by itself enough to make OpenAI reject
+    an otherwise valid file.
+
     If ffprobe isn't available, or the codec can't be determined, this errs
     on the side of transcoding rather than gambling on a 400 from OpenAI -
     transcoding a file that was already fine just costs a little CPU time.
@@ -234,16 +257,7 @@ def _prepare_for_whisper(audio_bytes: bytes, content_type: str | None) -> tuple[
     codec = _probe_audio_codec(audio_bytes)
 
     if codec is not None and codec in _WHISPER_SAFE_CODECS:
-        # Known-good codec: skip transcoding, use the original bytes with a
-        # generic-but-accepted extension so OpenAI's filename-based sniffing
-        # doesn't get confused by an unusual original name.
-        ext = {"aac": "m4a", "mp3": "mp3", "flac": "flac", "vorbis": "ogg", "opus": "ogg"}.get(
-            codec, "wav"
-        )
-        native_content_type = {
-            "m4a": "audio/mp4", "mp3": "audio/mpeg", "flac": "audio/flac", "ogg": "audio/ogg",
-            "wav": "audio/wav",
-        }[ext]
+        ext, native_content_type = _CODEC_TO_EXTENSION_AND_CONTENT_TYPE[codec]
         return audio_bytes, native_content_type, ext
 
     log.info(
