@@ -14,6 +14,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -109,6 +113,102 @@ class AzureSpeechProvider:
         return bool(self._key)
 
 
+# Content types a Whisper-compatible /audio/transcriptions endpoint accepts
+# without any conversion, mapped to the filename extension OpenAI expects to
+# see (it partly infers format from the filename, not content_type alone).
+_OPENAI_NATIVE_CONTENT_TYPES: dict[str, str] = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "mp4",
+    "audio/x-m4a": "m4a",
+    "audio/m4a": "m4a",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/webm": "webm",
+    "audio/ogg": "ogg",
+    "audio/flac": "flac",
+    "audio/x-flac": "flac",
+}
+
+_FFMPEG_PATH = shutil.which("ffmpeg")
+
+
+def _transcode_to_wav(audio_bytes: bytes) -> bytes:
+    """Converts arbitrary audio into 16kHz mono WAV via ffmpeg.
+
+    Exists because a phone's call-recorder app can save its output in a
+    container/codec a Whisper-compatible endpoint flatly rejects - most
+    commonly AMR-NB (a low-bitrate speech codec used for call audio), often
+    even when the filename extension looks like an accepted one (e.g. an
+    ".m4a" file that is actually AMR inside). This is not one device's
+    problem: whichever app or manufacturer produced the recording, if its
+    encoding isn't in the accepted set, the fix is the same - normalise to a
+    format every provider accepts, rather than trying to special-case each
+    unsupported encoder as it's discovered.
+
+    Raises ProviderUnavailableError with a user-facing message if ffmpeg is
+    unavailable or the input can't be decoded at all (e.g. a genuinely
+    corrupted or empty file) - callers should treat that as a job failure,
+    not retry it, since retrying can't fix a bad recording.
+    """
+    if not _FFMPEG_PATH:
+        raise ProviderUnavailableError(
+            "This recording's audio format isn't supported.",
+            user_message="This recording's audio format isn't supported. Please try a different recording.",
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "input.bin"
+        dst = Path(tmp) / "output.wav"
+        src.write_bytes(audio_bytes)
+
+        result = subprocess.run(
+            [
+                _FFMPEG_PATH,
+                "-y",
+                "-i", str(src),
+                "-ar", "16000",
+                "-ac", "1",
+                "-f", "wav",
+                str(dst),
+            ],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+
+        if result.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
+            log.warning(
+                "audio_transcode_failed",
+                ffmpeg_stderr=result.stderr.decode("utf-8", errors="replace")[-500:],
+            )
+            raise ProviderUnavailableError(
+                "audio transcode failed",
+                user_message="We couldn't process this recording's audio. Please try a different recording.",
+            )
+
+        return dst.read_bytes()
+
+
+def _prepare_for_whisper(audio_bytes: bytes, content_type: str | None) -> tuple[bytes, str, str]:
+    """Returns (bytes, content_type, filename_extension) ready to upload.
+
+    Only transcodes when the incoming content type isn't already one Whisper
+    accepts natively - the common case (recordings made by BaatX's own Tell
+    AI recorder, which always produces AAC/M4A) passes through untouched, so
+    this adds no overhead for the majority of uploads.
+    """
+    normalized = (content_type or "").split(";")[0].strip().lower()
+    ext = _OPENAI_NATIVE_CONTENT_TYPES.get(normalized)
+    if ext:
+        return audio_bytes, normalized, ext
+
+    log.info("audio_transcoding_to_wav", original_content_type=content_type)
+    wav_bytes = _transcode_to_wav(audio_bytes)
+    return wav_bytes, "audio/wav", "wav"
+
+
 class OpenAICompatibleSTT:
     """Whisper-style `/audio/transcriptions`. Splits payloads above the configured limit.
 
@@ -144,8 +244,10 @@ class OpenAICompatibleSTT:
             )
 
     @_retry
-    async def _transcribe_part(self, part: bytes, content_type: str, language: str | None) -> str:
-        files = {"file": ("audio", io.BytesIO(part), content_type)}
+    async def _transcribe_part(
+        self, part: bytes, content_type: str, extension: str, language: str | None
+    ) -> str:
+        files = {"file": (f"audio.{extension}", io.BytesIO(part), content_type)}
         data = {"model": self._model, "response_format": "json"}
         if language:
             data["language"] = language
@@ -173,6 +275,25 @@ class OpenAICompatibleSTT:
                 f"STT endpoint not found at {self._base_url}/audio/transcriptions. "
                 "Check STT_BASE_URL/STT_API_KEY/STT_MODEL."
             )
+        if response.status_code == 400:
+            # Logging the response body (not just the status code) is what
+            # actually distinguishes "unsupported audio format", "file too
+            # large", "empty file" etc. - the previous bare raise_for_status()
+            # only ever surfaced "400 Bad Request" with no indication of why,
+            # which is indistinguishable from any other client error.
+            log.warning(
+                "stt_rejected_audio",
+                base_url=self._base_url,
+                content_type=content_type,
+                extension=extension,
+                part_bytes=len(part),
+                response_body=response.text[:1000],
+            )
+            raise ProviderUnavailableError(
+                "STT rejected the audio",
+                user_message="We couldn't process this recording's audio. Please try a different recording.",
+            )
+
         response.raise_for_status()
         return (response.json().get("text") or "").strip()
 
@@ -187,15 +308,25 @@ class OpenAICompatibleSTT:
         if audio_bytes is None:
             raise ProviderUnavailableError("STT requires the audio payload")
 
+        # Transcoding (if needed) runs once on the whole file, before
+        # chunking - splitting an AMR/3GP stream into byte-range parts first
+        # and transcoding each part independently would produce corrupt,
+        # independently-undecodable fragments for most codecs.
+        prepared_bytes, prepared_content_type, extension = await asyncio.to_thread(
+            _prepare_for_whisper, audio_bytes, content_type
+        )
+
         language = (candidate_locales or ["hi"])[0].split("-")[0]
         parts = [
-            audio_bytes[i : i + self._max_part_bytes]
-            for i in range(0, len(audio_bytes), self._max_part_bytes)
+            prepared_bytes[i : i + self._max_part_bytes]
+            for i in range(0, len(prepared_bytes), self._max_part_bytes)
         ]
 
         texts = []
         for part in parts:  # sequential: preserves ordering and respects rate limits
-            texts.append(await self._transcribe_part(part, content_type or "audio/mpeg", language))
+            texts.append(
+                await self._transcribe_part(part, prepared_content_type, extension, language)
+            )
             await asyncio.sleep(0)
 
         return TranscriptionResult(
